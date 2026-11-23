@@ -54,6 +54,44 @@ ruff check .
 ruff format --check .
 ```
 
-## Current Status (Milestone 1)
+## Current Status
 
-Milestone 1 establishes the foundational layered architecture with a responsive QML interface, reactive `ListModel` conversation view, background worker execution, and a simulated model provider (`FakeModelProvider`). Local model (Ollama) and persistence (SQLite/Alembic) integration will follow in subsequent milestones.
+- **Milestone 1**: Foundational layered architecture with a responsive QML interface, reactive `ListModel` conversation view, background worker execution on dedicated `QThreadPool`, hardened worker lifecycle / shutdown safety, and a simulated model provider (`FakeModelProvider`).
+- **Milestone 2.1 (Database Foundation)**: SQLite persistence foundation implemented under `orion.infrastructure.persistence`:
+  - Path resolution conforming to Linux XDG Base Directory specification (`$XDG_DATA_HOME/orion/orion.db` or `~/.local/share/orion/orion.db`), with directory permissions `0700` and database file permissions `0600`.
+  - Configurable database path override via `ORION_DB_PATH` environment variable.
+  - Custom `UtcDateTime` SQLAlchemy TypeDecorator storing UTC ISO 8601 strings and returning timezone-aware `datetime` objects.
+  - SQLite configuration enforcing PRAGMA foreign keys (`ON`), busy timeout (5000 ms), write-ahead logging (`journal_mode=WAL`), and `synchronous=NORMAL`.
+  - SQLAlchemy ORM models: `ConversationModel`, `MessageModel`, `ActivityEventModel`, and `UserSettingModel` with strict check constraints and JSON validation.
+  - Alembic migration environment and baseline migration `0001_initial_persistence`.
+  - *Note*: Repository interfaces and integration of persistence into `AssistantService` and the UI workflow are scheduled for subsequent milestones (Milestone 2.2 and 2.3). The application currently runs with in-memory state and `FakeModelProvider`.
+
+## Database Administration & Migrations
+
+Alembic manages database schema migrations.
+
+Apply database migrations to the latest revision:
+```bash
+alembic upgrade head
+```
+
+Inspect current migration status:
+```bash
+alembic current
+```
+
+Roll back one revision:
+```bash
+alembic downgrade -1
+```
+
+Override database path for development or testing:
+```bash
+export ORION_DB_PATH="/tmp/test_orion.db"
+alembic upgrade head
+```
+
+Run persistence unit tests:
+```bash
+pytest tests/test_paths.py tests/test_types.py tests/test_database.py tests/test_models.py tests/test_migrations.py
+```
