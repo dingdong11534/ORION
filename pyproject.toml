@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orion-assistant"
+version = "0.1.0"
+description = "A local-first personal desktop AI assistant"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6-Essentials>=6.8,<7",
+    "pydantic>=2.10,<3",
+    "SQLAlchemy>=2.0,<3",
+    "alembic>=1.14,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "ruff>=0.9,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "core*", "tools*", "memory*", "api*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
