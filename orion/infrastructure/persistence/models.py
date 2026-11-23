@@ -129,10 +129,9 @@ class MessageModel(Base):
             "conversation_id", "sequence_number", name="uq_messages_conversation_sequence"
         ),
         UniqueConstraint(
-            "conversation_id",
             "client_request_id",
             "role",
-            name="uq_messages_conversation_request_role",
+            name="uq_messages_client_request_role",
         ),
         CheckConstraint("sequence_number >= 0", name="ck_messages_sequence_non_negative"),
         CheckConstraint("role IN ('user', 'assistant')", name="ck_messages_allowed_roles"),

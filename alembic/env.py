@@ -4,7 +4,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from orion.infrastructure.persistence.models import Base
-from orion.infrastructure.persistence.paths import get_database_path
+from orion.infrastructure.persistence.paths import ensure_secure_directory, get_database_path
 
 # Alembic Config object
 config = context.config
@@ -21,13 +21,17 @@ def get_url() -> str:
     # Check if explicitly provided via CLI -x or ini
     x_args = context.get_x_argument(as_dictionary=True)
     if "db_path" in x_args:
-        return f"sqlite:///{get_database_path(x_args['db_path'])}"
+        db_path = get_database_path(x_args["db_path"])
+        ensure_secure_directory(db_path.parent)
+        return f"sqlite:///{db_path}"
 
     url = config.get_main_option("sqlalchemy.url")
     if url and url.strip():
         return url
 
-    return f"sqlite:///{get_database_path()}"
+    db_path = get_database_path()
+    ensure_secure_directory(db_path.parent)
+    return f"sqlite:///{db_path}"
 
 
 def run_migrations_offline() -> None:
