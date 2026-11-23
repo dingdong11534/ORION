@@ -1,5 +1,6 @@
 """Application entry point for ORION desktop assistant."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +12,9 @@ from PySide6.QtQml import QQmlApplicationEngine
 from sqlalchemy import Engine, text
 
 from orion.application.assistant_service import AssistantService
+from orion.application.ports import ModelProvider
 from orion.infrastructure.fake_model_provider import FakeModelProvider
+from orion.infrastructure.ollama_model_provider import OllamaModelProvider
 from orion.infrastructure.persistence.database import (
     create_db_engine,
     create_session_factory,
@@ -83,6 +86,26 @@ def check_database_migration(
             )
 
 
+def create_model_provider() -> ModelProvider:
+    """Create and return configured ModelProvider based on environment variables.
+
+    Defaults to OllamaModelProvider with qwen2.5:1.5b. Does not connect to the
+    server on startup; network connectivity is deferred until inference requests.
+    """
+    provider_type = os.environ.get("ORION_MODEL_PROVIDER", "ollama").strip().lower()
+
+    if provider_type == "ollama":
+        base_url = os.environ.get("ORION_OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
+        model_name = os.environ.get("ORION_OLLAMA_MODEL", "qwen2.5:1.5b").strip()
+        return OllamaModelProvider(base_url=base_url, model_name=model_name)
+    elif provider_type == "fake":
+        return FakeModelProvider(simulated_delay=0.15)
+    else:
+        raise ValueError(
+            f"Unsupported ORION_MODEL_PROVIDER: {provider_type!r}. Supported providers: 'ollama', 'fake'."
+        )
+
+
 def main() -> int:
     app = QGuiApplication(sys.argv)
     app.setApplicationName("ORION")
@@ -111,7 +134,13 @@ def main() -> int:
     settings_store = SqliteSettingsStore(session_factory)
 
     # 6. Construct model provider & inject dependencies into AssistantService
-    model_provider = FakeModelProvider(simulated_delay=0.15)
+    try:
+        model_provider = create_model_provider()
+    except ValueError as exc:
+        print(f"ORION CONFIGURATION ERROR:\n{exc}", file=sys.stderr)
+        engine.dispose()
+        return 1
+
     assistant_service = AssistantService(
         model_provider=model_provider,
         conversation_store=conversation_store,
