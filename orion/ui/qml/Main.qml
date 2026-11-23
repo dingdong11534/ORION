@@ -14,25 +14,33 @@ ApplicationWindow {
     title: "ORION"
     color: "#F4F1E9"
 
-    property var messages: [
-        {
-            role: "assistant",
-            text: "Hello. I'm ORION. Your desktop interface and Python core are connected. The local AI model has not been connected yet."
+    readonly property bool busy: (typeof orion !== "undefined" && orion !== null) ? orion.isBusy : false
+
+    ListModel {
+        id: chatModel
+
+        ListElement {
+            role: "assistant"
+            text: "Hello. I'm ORION. Your desktop interface and Python core are connected.\n(Simulated mode: local AI model not connected yet)"
+            isError: false
         }
-    ]
+    }
 
     function sendMessage() {
         const message = composer.text.trim()
 
-        if (message.length === 0)
+        if (message.length === 0 || root.busy)
             return
 
-        messages = messages.concat([
-            { role: "user", text: message }
-        ])
+        chatModel.append({
+            role: "user",
+            text: message,
+            isError: false
+        })
 
         composer.clear()
-        orion.send(message)
+        composer.forceActiveFocus()
+        orion.sendMessage(message)
 
         Qt.callLater(function() {
             chatList.positionViewAtEnd()
@@ -43,9 +51,23 @@ ApplicationWindow {
         target: orion
 
         function onResponseReady(replyText) {
-            root.messages = root.messages.concat([
-                { role: "assistant", text: replyText }
-            ])
+            chatModel.append({
+                role: "assistant",
+                text: replyText,
+                isError: false
+            })
+
+            Qt.callLater(function() {
+                chatList.positionViewAtEnd()
+            })
+        }
+
+        function onErrorOccurred(errorMessage) {
+            chatModel.append({
+                role: "assistant",
+                text: "Error: " + errorMessage,
+                isError: true
+            })
 
             Qt.callLater(function() {
                 chatList.positionViewAtEnd()
@@ -191,18 +213,18 @@ ApplicationWindow {
                         width: 8
                         height: 8
                         radius: 4
-                        color: "#77936F"
+                        color: root.busy ? "#D48B38" : "#77936F"
                     }
 
                     Text {
-                        text: "Desktop core online"
-                        color: "#53654F"
+                        text: root.busy ? "Processing request..." : "Desktop core online"
+                        color: root.busy ? "#8A5B28" : "#53654F"
                         font.pixelSize: 12
                     }
                 }
 
                 Text {
-                    text: "Model: Not connected"
+                    text: root.busy ? "Model: Generating (Simulated)..." : "Model: Simulated (FakeModel)"
                     color: "#85877C"
                     font.pixelSize: 11
                 }
@@ -250,17 +272,17 @@ ApplicationWindow {
                     }
 
                     Rectangle {
-                        width: 105
+                        width: root.busy ? 118 : 105
                         height: 30
                         radius: 15
-                        color: "#E6ECE3"
+                        color: root.busy ? "#F6EEDD" : "#E6ECE3"
 
                         Text {
                             anchors.centerIn: parent
-                            text: "CORE ONLINE"
+                            text: root.busy ? "THINKING..." : "CORE ONLINE"
                             font.pixelSize: 10
                             font.bold: true
-                            color: "#526D5B"
+                            color: root.busy ? "#8A5B28" : "#526D5B"
                         }
                     }
                 }
@@ -280,7 +302,7 @@ ApplicationWindow {
 
                     clip: true
                     spacing: 12
-                    model: root.messages
+                    model: chatModel
 
                     delegate: Item {
                         width: chatList.width
@@ -288,7 +310,7 @@ ApplicationWindow {
 
                         Row {
                             width: parent.width
-                            layoutDirection: modelData.role === "user"
+                            layoutDirection: model.role === "user"
                                              ? Qt.RightToLeft
                                              : Qt.LeftToRight
 
@@ -297,27 +319,29 @@ ApplicationWindow {
 
                                 width: Math.min(
                                     chatList.width * 0.78,
-                                    Math.max(190, modelData.text.length * 7 + 36)
+                                    Math.max(120, bubbleText.implicitWidth + 34)
                                 )
 
                                 height: bubbleText.implicitHeight + 24
                                 radius: 15
 
-                                color: modelData.role === "user"
-                                       ? "#E4EAE1"
-                                       : "#F0EEE8"
+                                color: model.isError
+                                       ? "#FCE8E6"
+                                       : (model.role === "user" ? "#E4EAE1" : "#F0EEE8")
+                                border.width: model.isError ? 1 : 0
+                                border.color: model.isError ? "#E5A9A4" : "transparent"
 
                                 Text {
                                     id: bubbleText
 
                                     x: 17
                                     y: 12
-                                    width: bubble.width - 34
+                                    width: Math.min(implicitWidth, chatList.width * 0.78 - 34)
 
-                                    text: modelData.text
-                                    wrapMode: Text.WordWrap
+                                    text: model.text
+                                    wrapMode: Text.Wrap
 
-                                    color: "#384139"
+                                    color: model.isError ? "#9C2B27" : "#384139"
                                     font.pixelSize: 14
                                     lineHeight: 1.35
                                 }
@@ -334,7 +358,7 @@ ApplicationWindow {
                     height: 62
 
                     radius: 16
-                    color: "#F2F0EA"
+                    color: root.busy ? "#EBE9E3" : "#F2F0EA"
                     border.width: 1
                     border.color: "#E6E3D9"
 
@@ -348,8 +372,9 @@ ApplicationWindow {
                             id: composer
 
                             Layout.fillWidth: true
+                            enabled: !root.busy
 
-                            placeholderText: "Message ORION..."
+                            placeholderText: root.busy ? "ORION is generating a response..." : "Message ORION..."
                             placeholderTextColor: "#999B90"
 
                             color: "#303A32"
@@ -367,7 +392,8 @@ ApplicationWindow {
                         Button {
                             id: sendButton
 
-                            text: "Send"
+                            enabled: !root.busy && composer.text.trim().length > 0
+                            text: root.busy ? "Wait..." : "Send"
                             implicitWidth: 76
                             implicitHeight: 42
 
@@ -375,9 +401,9 @@ ApplicationWindow {
 
                             background: Rectangle {
                                 radius: 12
-                                color: sendButton.down
-                                       ? "#3C5547"
-                                       : "#526D5B"
+                                color: !sendButton.enabled
+                                       ? "#A4B0A7"
+                                       : (sendButton.down ? "#3C5547" : "#526D5B")
                             }
 
                             contentItem: Text {
@@ -394,7 +420,7 @@ ApplicationWindow {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "ORION is running locally. Model responses are not enabled yet."
+                    text: "ORION is running locally in simulated mode. Local AI model integration is the next milestone."
                     color: "#A0A094"
                     font.pixelSize: 10
                     horizontalAlignment: Text.AlignHCenter

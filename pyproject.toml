@@ -20,12 +20,19 @@ dev = [
     "ruff>=0.9,<1",
 ]
 
+[project.scripts]
+orion = "orion.main:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app*", "core*", "tools*", "memory*", "api*"]
+include = ["orion*"]
+
+[tool.setuptools.package-data]
+"orion.ui" = ["qml/*.qml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
