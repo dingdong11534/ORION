@@ -1,13 +1,43 @@
 import threading
 import time
+import uuid
+from pathlib import Path
 
 import pytest
+from alembic.config import Config
 from PySide6.QtCore import QCoreApplication, QThreadPool
 
+from alembic import command
 from orion.application.assistant_service import AssistantService
 from orion.infrastructure.fake_model_provider import FakeModelProvider
+from orion.infrastructure.persistence.database import create_db_engine, create_session_factory
+from orion.infrastructure.persistence.repositories import (
+    SqliteConversationStore,
+    SqliteSettingsStore,
+)
 from orion.infrastructure.workers import Worker
 from orion.ui.qt_bridge import OrionBridge
+
+
+def _apply_migrations(db_url: str) -> None:
+    ini_path = Path(__file__).parent.parent / "alembic.ini"
+    cfg = Config(str(ini_path))
+    cfg.set_main_option("sqlalchemy.url", db_url)
+    command.upgrade(cfg, "head")
+
+
+def _make_service(provider, tmp_path: Path) -> AssistantService:
+    db_file = tmp_path / f"bridge_{uuid.uuid4().hex}.db"
+    _apply_migrations(f"sqlite:///{db_file}")
+    engine = create_db_engine(db_file)
+    factory = create_session_factory(engine)
+    conv_store = SqliteConversationStore(factory)
+    settings_store = SqliteSettingsStore(factory)
+    return AssistantService(
+        model_provider=provider,
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
 
 
 @pytest.fixture(scope="session")
@@ -65,9 +95,9 @@ def test_worker_error_handling(qapp):
     assert finished == [True]
 
 
-def test_bridge_send_and_busy_state(qapp):
+def test_bridge_send_and_busy_state(qapp, tmp_path):
     provider = FakeModelProvider(simulated_delay=0.05)
-    service = AssistantService(model_provider=provider)
+    service = _make_service(provider, tmp_path)
     pool = QThreadPool()
     bridge = OrionBridge(assistant_service=service, thread_pool=pool)
 
@@ -99,8 +129,8 @@ def test_bridge_send_and_busy_state(qapp):
     assert False in busy_states
 
 
-def test_bridge_rejects_blank_message(qapp):
-    service = AssistantService(model_provider=FakeModelProvider())
+def test_bridge_rejects_blank_message(qapp, tmp_path):
+    service = _make_service(FakeModelProvider(), tmp_path)
     bridge = OrionBridge(assistant_service=service)
 
     errors = []
@@ -112,8 +142,8 @@ def test_bridge_rejects_blank_message(qapp):
     assert not bridge.isBusy
 
 
-def test_bridge_dedicated_thread_pool(qapp):
-    service = AssistantService(model_provider=FakeModelProvider())
+def test_bridge_dedicated_thread_pool(qapp, tmp_path):
+    service = _make_service(FakeModelProvider(), tmp_path)
     bridge = OrionBridge(assistant_service=service)
 
     assert bridge._thread_pool is not None
@@ -122,7 +152,7 @@ def test_bridge_dedicated_thread_pool(qapp):
     assert bridge._owns_thread_pool is True
 
 
-def test_worker_references_tracked_and_cleaned_up(qapp):
+def test_worker_references_tracked_and_cleaned_up(qapp, tmp_path):
     started_event = threading.Event()
     proceed_event = threading.Event()
 
@@ -132,7 +162,7 @@ def test_worker_references_tracked_and_cleaned_up(qapp):
             assert proceed_event.wait(timeout=5)
             return f"Done: {prompt}"
 
-    service = AssistantService(model_provider=SyncModelProvider())
+    service = _make_service(SyncModelProvider(), tmp_path)
     bridge = OrionBridge(assistant_service=service)
 
     assert len(bridge._active_workers) == 0
@@ -144,6 +174,7 @@ def test_worker_references_tracked_and_cleaned_up(qapp):
     assert len(bridge._active_workers) == 1
     req_id = next(iter(bridge._active_workers.keys()))
     assert isinstance(bridge._active_workers[req_id], Worker)
+    assert req_id.startswith("req_")
     assert bridge.isBusy
 
     # Release worker to complete
@@ -155,8 +186,8 @@ def test_worker_references_tracked_and_cleaned_up(qapp):
     assert len(bridge._active_workers) == 0
 
 
-def test_shutdown_prevents_new_submissions(qapp):
-    service = AssistantService(model_provider=FakeModelProvider())
+def test_shutdown_prevents_new_submissions(qapp, tmp_path):
+    service = _make_service(FakeModelProvider(), tmp_path)
     bridge = OrionBridge(assistant_service=service)
 
     errors = []
@@ -173,7 +204,7 @@ def test_shutdown_prevents_new_submissions(qapp):
     assert len(bridge._active_workers) == 0
 
 
-def test_shutdown_waits_for_active_work_to_complete(qapp):
+def test_shutdown_waits_for_active_work_to_complete(qapp, tmp_path):
     started_event = threading.Event()
 
     class DelayedProvider:
@@ -182,7 +213,7 @@ def test_shutdown_waits_for_active_work_to_complete(qapp):
             time.sleep(0.05)
             return f"Done: {prompt}"
 
-    service = AssistantService(model_provider=DelayedProvider())
+    service = _make_service(DelayedProvider(), tmp_path)
     bridge = OrionBridge(assistant_service=service)
 
     bridge.sendMessage("Shutdown wait test")
@@ -195,12 +226,12 @@ def test_shutdown_waits_for_active_work_to_complete(qapp):
     assert not bridge.isBusy
 
 
-def test_failure_resets_busy_state_and_cleans_up(qapp):
+def test_failure_resets_busy_state_and_cleans_up(qapp, tmp_path):
     class CrashingProvider:
         def generate_response(self, prompt: str, history=None) -> str:
             raise RuntimeError("Fatal inference failure")
 
-    service = AssistantService(model_provider=CrashingProvider())
+    service = _make_service(CrashingProvider(), tmp_path)
     bridge = OrionBridge(assistant_service=service)
 
     errors = []
@@ -219,7 +250,7 @@ def test_failure_resets_busy_state_and_cleans_up(qapp):
     assert "Fatal inference failure" in errors[0]
 
 
-def test_shutdown_timeout_preserves_running_workers_and_cleans_up_on_completion(qapp):
+def test_shutdown_timeout_preserves_running_workers_and_cleans_up_on_completion(qapp, tmp_path):
     started_event = threading.Event()
     block_event = threading.Event()
 
@@ -229,7 +260,7 @@ def test_shutdown_timeout_preserves_running_workers_and_cleans_up_on_completion(
             assert block_event.wait(timeout=5)
             return f"Done: {prompt}"
 
-    service = AssistantService(model_provider=BlockedProvider())
+    service = _make_service(BlockedProvider(), tmp_path)
     bridge = OrionBridge(assistant_service=service)
 
     bridge.sendMessage("Blocking request")
@@ -268,3 +299,66 @@ def test_shutdown_timeout_preserves_running_workers_and_cleans_up_on_completion(
     # Cleanup must occur only after worker completion
     assert len(bridge._active_workers) == 0
     assert not bridge.isBusy
+
+
+def test_bridge_passes_request_id_to_service(qapp, tmp_path):
+    """Bridge generates prefixed UUIDv4 and passes it to AssistantService."""
+    captured_ids = []
+
+    class MockProvider:
+        def generate_response(self, prompt: str, history=None) -> str:
+            return "OK"
+
+    service = _make_service(MockProvider(), tmp_path)
+    orig_send = service.send_message
+
+    def wrap_send(*args, **kwargs):
+        req_id = kwargs.get("client_request_id")
+        captured_ids.append(req_id)
+        return orig_send(*args, **kwargs)
+
+    service.send_message = wrap_send  # type: ignore[method-assign]
+
+    bridge = OrionBridge(assistant_service=service)
+    bridge.sendMessage("Test request ID passing")
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert len(captured_ids) == 1
+    rid = captured_ids[0]
+    assert rid is not None
+    assert rid.startswith("req_")
+    assert len(rid) == 36
+
+
+def test_bridge_response_reaches_signal_after_persistence(qapp, tmp_path):
+    """When responseReady is emitted, message is already committed in SQLite."""
+    db_file = tmp_path / "persistence_check.db"
+    _apply_migrations(f"sqlite:///{db_file}")
+    engine = create_db_engine(db_file)
+    factory = create_session_factory(engine)
+    conv_store = SqliteConversationStore(factory)
+    settings_store = SqliteSettingsStore(factory)
+    provider = FakeModelProvider()
+    service = AssistantService(provider, conv_store, settings_store)
+
+    bridge = OrionBridge(assistant_service=service)
+    responses = []
+    verified_in_db = []
+
+    def on_response(text):
+        responses.append(text)
+        # Check SQLite immediately when signal arrives on GUI thread
+        cid = service.active_conversation_id
+        hist = conv_store.load_history(cid)
+        # Both user and assistant must be completed in DB
+        if len(hist) == 2 and hist[1].content == text:
+            verified_in_db.append(True)
+
+    bridge.responseReady.connect(on_response)
+    bridge.sendMessage("Check persistence timing")
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert len(responses) == 1
+    assert len(verified_in_db) == 1

@@ -1,10 +1,14 @@
 import logging
-import uuid
 
 from PySide6.QtCore import Property, QObject, QThreadPool, Signal, Slot
 
 from orion.application.assistant_service import AssistantService
-from orion.application.contracts import ChatMessage
+from orion.application.contracts import (
+    AssistantResponse,
+    ChatMessage,
+    MessageStatus,
+    generate_request_id,
+)
 from orion.infrastructure.workers import Worker, WorkerSignals
 
 logger = logging.getLogger(__name__)
@@ -70,9 +74,14 @@ class OrionBridge(QObject):
 
         self._set_busy(True)
 
-        request_id = str(uuid.uuid4())
+        request_id = generate_request_id()
         signals = WorkerSignals(parent=self)
-        worker = Worker(self._service.send_message, trimmed, signals=signals)
+        worker = Worker(
+            self._service.send_message,
+            trimmed,
+            client_request_id=request_id,
+            signals=signals,
+        )
 
         # Retain worker reference for deterministic lifecycle management
         self._active_workers[request_id] = worker
@@ -99,7 +108,18 @@ class OrionBridge(QObject):
         if self._is_shutting_down:
             return
 
-        if isinstance(result, ChatMessage):
+        if isinstance(result, AssistantResponse):
+            if result.status == MessageStatus.COMPLETED:
+                self.responseReady.emit(result.content)
+            elif result.status == MessageStatus.PENDING:
+                self.errorOccurred.emit("A request with this ID is currently in progress.")
+            elif result.status == MessageStatus.FAILED:
+                self.errorOccurred.emit(
+                    f"Request failed: {result.assistant_message.error_message or 'Unknown error'}"
+                )
+            elif result.status == MessageStatus.INTERRUPTED:
+                self.errorOccurred.emit("Request was interrupted. Please retry.")
+        elif isinstance(result, ChatMessage):
             self.responseReady.emit(result.content)
         else:
             self.responseReady.emit(str(result))

@@ -17,6 +17,14 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def generate_request_id() -> str:
+    """Generate prefixed UUIDv4 for a client request submission.
+
+    Result is 'req_' + 32 hexadecimal characters = 36 characters total.
+    """
+    return f"req_{uuid.uuid4().hex}"
+
+
 def _require_timezone_aware(value: datetime) -> datetime:
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
         raise ValueError("Timestamp must be timezone-aware.")
@@ -50,7 +58,11 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     """Validated incoming chat request from UI or client."""
 
+    model_config = ConfigDict(frozen=True)
+
     content: str
+    client_request_id: str = Field(default_factory=generate_request_id)
+    conversation_id: str | None = None
 
     @field_validator("content")
     @classmethod
@@ -58,6 +70,14 @@ class ChatRequest(BaseModel):
         trimmed = value.strip()
         if not trimmed:
             raise ValueError("Message content cannot be blank or contain only whitespace.")
+        return trimmed
+
+    @field_validator("client_request_id")
+    @classmethod
+    def validate_client_request_id(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("client_request_id cannot be blank or contain only whitespace.")
         return trimmed
 
 
@@ -147,6 +167,21 @@ class RequestStartResult(BaseModel):
     created: bool
     """True if new messages were inserted; False if an existing request was returned."""
     request: RequestRecord
+
+
+class AssistantResponse(BaseModel):
+    """Immutable application response contract returned by AssistantService."""
+
+    model_config = ConfigDict(frozen=True)
+
+    conversation_id: str
+    client_request_id: str
+    user_message: PersistedMessage
+    assistant_message: PersistedMessage
+    status: MessageStatus
+    is_new: bool
+    content: str
+    role: Literal["assistant"] = "assistant"
 
 
 class ActivityEvent(BaseModel):

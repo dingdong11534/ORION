@@ -225,3 +225,68 @@ def test_settings_and_conversation_share_same_database(tmp_path: Path):
     assert sett_store.get_setting("active_conversation_id") == conv.id
     convs = conv_store.list_conversations()
     assert any(c.id == conv.id for c in convs)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end Service Integration (Milestone 2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_assistant_service_multiturn_persistence_and_recreation(tmp_path: Path):
+    """Multi-turn conversation persists in SQLite and survives service recreation."""
+    from orion.application.assistant_service import AssistantService
+    from orion.infrastructure.fake_model_provider import FakeModelProvider
+
+    db_file = tmp_path / "orion" / "e2e_service.db"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    db_url = f"sqlite:///{db_file}"
+    _apply_migrations(db_url)
+
+    engine = create_db_engine(db_file)
+    factory = create_session_factory(engine)
+    conv_store = SqliteConversationStore(factory)
+    settings_store = SqliteSettingsStore(factory)
+    provider = FakeModelProvider()
+
+    # Session 1: Run 3 turns
+    service1 = AssistantService(provider, conv_store, settings_store)
+    r1 = service1.send_message("First question")
+    r2 = service1.send_message("Second question")
+    r3 = service1.send_message("Third question")
+
+    cid = service1.active_conversation_id
+    assert cid is not None
+    assert r1.conversation_id == cid
+    assert r2.conversation_id == cid
+    assert r3.conversation_id == cid
+
+    # Verify history and sequences in DB: 6 messages, seq 0 to 5
+    hist = conv_store.load_history(cid, limit=100)
+    assert len(hist) == 6
+    assert [m.sequence_number for m in hist] == [0, 1, 2, 3, 4, 5]
+    assert [m.role for m in hist] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+    # Session 2: Recreate AssistantService with the exact same database and settings
+    service2 = AssistantService(provider, conv_store, settings_store)
+    assert service2.active_conversation_id == cid
+
+    # Active history is loaded from SQLite
+    history2 = service2.get_history()
+    assert len(history2) == 6
+    assert history2[0].content == "First question"
+    assert history2[4].content == "Third question"
+
+    # Send 4th turn on resumed session
+    r4 = service2.send_message("Fourth question")
+    assert r4.conversation_id == cid
+
+    hist_resumed = conv_store.load_history(cid, limit=100)
+    assert len(hist_resumed) == 8
+    assert [m.sequence_number for m in hist_resumed] == list(range(8))
