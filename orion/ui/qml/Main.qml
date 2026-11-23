@@ -55,6 +55,14 @@ ApplicationWindow {
             isError: false
         })
 
+        // Placeholder assistant message for incremental streaming output
+        chatModel.append({
+            role: "assistant",
+            text: "",
+            status: "pending",
+            isError: false
+        })
+
         composer.clear()
         composer.forceActiveFocus()
         orion.sendMessage(message)
@@ -131,7 +139,33 @@ ApplicationWindow {
             }
         }
 
+        function onResponseChunk(chunk, requestId) {
+            if (chatModel.count > 0) {
+                let lastIdx = chatModel.count - 1
+                let lastItem = chatModel.get(lastIdx)
+                if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
+                    let currentText = lastItem.text || ""
+                    chatModel.setProperty(lastIdx, "text", currentText + chunk)
+                    chatList.positionViewAtEnd()
+                    return
+                }
+            }
+        }
+
         function onResponseReady(replyText) {
+            if (chatModel.count > 0) {
+                let lastIdx = chatModel.count - 1
+                let lastItem = chatModel.get(lastIdx)
+                if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
+                    chatModel.setProperty(lastIdx, "text", replyText)
+                    chatModel.setProperty(lastIdx, "status", "completed")
+                    Qt.callLater(function() {
+                        chatList.positionViewAtEnd()
+                    })
+                    return
+                }
+            }
+
             chatModel.append({
                 role: "assistant",
                 text: replyText,
@@ -145,6 +179,24 @@ ApplicationWindow {
         }
 
         function onErrorOccurred(errorMessage) {
+            if (chatModel.count > 0) {
+                let lastIdx = chatModel.count - 1
+                let lastItem = chatModel.get(lastIdx)
+                if (lastItem.role === "assistant" && (lastItem.status === "pending" || !lastItem.isError)) {
+                    let errorText = "Error: " + errorMessage
+                    if (lastItem.text && lastItem.text.length > 0) {
+                        errorText = lastItem.text + "\n\n[Error: " + errorMessage + "]"
+                    }
+                    chatModel.setProperty(lastIdx, "text", errorText)
+                    chatModel.setProperty(lastIdx, "status", "failed")
+                    chatModel.setProperty(lastIdx, "isError", true)
+                    Qt.callLater(function() {
+                        chatList.positionViewAtEnd()
+                    })
+                    return
+                }
+            }
+
             chatModel.append({
                 role: "assistant",
                 text: "Error: " + errorMessage,
@@ -599,7 +651,8 @@ ApplicationWindow {
                                         Text {
                                             id: bubbleText
                                             Layout.fillWidth: true
-                                            text: model.text
+                                            text: (model.status === "pending" && (!model.text || model.text.length === 0)) ? "..." : model.text
+                                            opacity: (model.status === "pending" && (!model.text || model.text.length === 0)) ? 0.6 : 1.0
                                             wrapMode: Text.Wrap
                                             color: {
                                                 if (model.status === "failed") return "#9C2B27"

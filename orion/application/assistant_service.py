@@ -1,7 +1,7 @@
 """Assistant service orchestrating conversation workflows, model inference, and persistence."""
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 
 from orion.application.contracts import (
     AssistantResponse,
@@ -369,3 +369,142 @@ class AssistantService:
             is_new=True,
             content=response_text,
         )
+
+    def stream_message(
+        self,
+        content_or_request: str | ChatRequest,
+        client_request_id: str | None = None,
+        conversation_id: str | None = None,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> Iterator[str]:
+        """Process incoming user message incrementally, yielding chunks and persisting once complete."""
+        # A. Receive request & validate
+        if isinstance(content_or_request, ChatRequest):
+            req = content_or_request
+        else:
+            req_id = client_request_id or generate_request_id()
+            req = ChatRequest(
+                content=content_or_request,
+                client_request_id=req_id,
+                conversation_id=conversation_id,
+            )
+
+        target_cid = req.conversation_id or self._active_conversation_id
+
+        # B. Begin persistent request
+        try:
+            start_result = self._conversation_store.begin_request(
+                client_request_id=req.client_request_id,
+                user_content=req.content,
+                conversation_id=target_cid,
+            )
+        except Exception as exc:
+            raise AssistantServiceError(f"Failed to begin persistent request: {exc}") from exc
+
+        cid = start_result.request.conversation_id
+
+        # Update active conversation if newly created or switched
+        if self._active_conversation_id != cid:
+            self._active_conversation_id = cid
+            if self._settings_store is not None:
+                try:
+                    self._settings_store.set_setting("active_conversation_id", cid)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to persist active_conversation_id setting: %s", exc)
+
+        # Handle duplicate / existing request (created=False)
+        if not start_result.created:
+            asst = start_result.request.assistant_message
+            if asst.status == MessageStatus.COMPLETED:
+                text = asst.content or ""
+                if on_chunk is not None:
+                    on_chunk(text)
+                yield text
+                return
+            if asst.status == MessageStatus.PENDING:
+                raise AssistantServiceError("A request with this ID is currently in progress.")
+            if asst.status == MessageStatus.FAILED:
+                raise AssistantServiceError(
+                    f"Request failed: {asst.error_message or 'Unknown error'}"
+                )
+            if asst.status == MessageStatus.INTERRUPTED:
+                raise AssistantServiceError(
+                    f"Request was interrupted: {asst.error_message or asst.content or 'Cancelled'}"
+                )
+
+        # C. Load model history
+        try:
+            persisted_history = self._conversation_store.load_history(cid, limit=100)
+        except Exception as exc:
+            raise AssistantServiceError(f"Failed to load history for model: {exc}") from exc
+
+        completed_request_ids = {
+            m.client_request_id
+            for m in persisted_history
+            if m.role == "assistant" and m.status == MessageStatus.COMPLETED
+        }
+
+        chat_history = [
+            ChatMessage(
+                id=m.id,
+                role=m.role,
+                content=m.content or "",
+                timestamp=m.created_at,
+            )
+            for m in persisted_history
+            if m.status == MessageStatus.COMPLETED
+            and m.content
+            and m.client_request_id in completed_request_ids
+            and m.client_request_id != req.client_request_id
+        ]
+
+        # D. Stream response chunks without holding open database transactions
+        accumulated_chunks: list[str] = []
+        try:
+            if hasattr(self._model_provider, "stream_response"):
+                chunk_iter = self._model_provider.stream_response(
+                    prompt=req.content,
+                    history=chat_history,
+                )
+            else:
+                full_text = self._model_provider.generate_response(
+                    prompt=req.content,
+                    history=chat_history,
+                )
+                chunk_iter = iter([full_text])
+
+            for chunk in chunk_iter:
+                accumulated_chunks.append(chunk)
+                if on_chunk is not None:
+                    on_chunk(chunk)
+                yield chunk
+        except Exception as model_exc:
+            # Model failure: record failure in persistence
+            err_msg = str(model_exc)
+            try:
+                self._conversation_store.fail_request(
+                    conversation_id=cid,
+                    client_request_id=req.client_request_id,
+                    error_message=err_msg,
+                )
+            except Exception as persist_exc:  # noqa: BLE001
+                raise AssistantServiceError(
+                    f"Model provider generation failed: {model_exc}; "
+                    f"additionally, recording failure in database failed: {persist_exc}"
+                ) from model_exc
+            raise AssistantServiceError(
+                f"Model provider generation failed: {model_exc}"
+            ) from model_exc
+
+        # E. Successful completion: persist completed assistant response exactly once
+        full_response = "".join(accumulated_chunks)
+        try:
+            self._conversation_store.complete_request(
+                conversation_id=cid,
+                client_request_id=req.client_request_id,
+                response_content=full_response,
+            )
+        except Exception as complete_exc:
+            raise AssistantServiceError(
+                f"Failed to persist completed response: {complete_exc}"
+            ) from complete_exc

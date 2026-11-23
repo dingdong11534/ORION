@@ -310,14 +310,14 @@ def test_bridge_passes_request_id_to_service(qapp, tmp_path):
             return "OK"
 
     service = _make_service(MockProvider(), tmp_path)
-    orig_send = service.send_message
+    orig_stream = service.stream_message
 
-    def wrap_send(*args, **kwargs):
+    def wrap_stream(*args, **kwargs):
         req_id = kwargs.get("client_request_id")
         captured_ids.append(req_id)
-        return orig_send(*args, **kwargs)
+        return orig_stream(*args, **kwargs)
 
-    service.send_message = wrap_send  # type: ignore[method-assign]
+    service.stream_message = wrap_stream  # type: ignore[method-assign]
 
     bridge = OrionBridge(assistant_service=service)
     bridge.sendMessage("Test request ID passing")
@@ -510,3 +510,101 @@ def test_no_database_operation_runs_on_gui_thread(qapp, tmp_path, monkeypatch):
     assert len(worker_threads) >= 1
     for t in worker_threads:
         assert t != main_thread, "Database operation executed on GUI main thread!"
+
+
+# ---------------------------------------------------------------------------
+# Streaming Bridge & Worker Tests (Milestone 3.4)
+# ---------------------------------------------------------------------------
+
+
+class MockStreamingTestProvider:
+    def __init__(self, chunks: list[str]) -> None:
+        self.chunks = chunks
+
+    def stream_response(self, prompt: str, history=None):
+        yield from self.chunks
+
+    def generate_response(self, prompt: str, history=None) -> str:
+        return "".join(self.chunks)
+
+
+def test_bridge_streaming_emits_chunks_and_final_response(qapp, tmp_path):
+    """Bridge emits responseChunk for each chunk and responseReady upon completion."""
+    provider = MockStreamingTestProvider(["Alpha ", "Beta ", "Gamma"])
+    service = _make_service(provider, tmp_path)
+    bridge = OrionBridge(assistant_service=service)
+
+    received_chunks = []
+    received_ready = []
+    busy_states = []
+
+    bridge.responseChunk.connect(lambda chunk, req_id: received_chunks.append((chunk, req_id)))
+    bridge.responseReady.connect(lambda text: received_ready.append(text))
+    bridge.busyChanged.connect(lambda busy: busy_states.append(busy))
+
+    bridge.sendMessage("Stream to Qt")
+    assert bridge.isBusy
+
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert not bridge.isBusy
+    assert len(received_chunks) == 3
+    assert [c[0] for c in received_chunks] == ["Alpha ", "Beta ", "Gamma"]
+    assert received_chunks[0][1].startswith("req_")
+    # All chunks for this turn share the same request ID
+    assert received_chunks[0][1] == received_chunks[1][1] == received_chunks[2][1]
+
+    assert len(received_ready) == 1
+    assert received_ready[0] == "Alpha Beta Gamma"
+    assert True in busy_states
+    assert False in busy_states
+
+
+def test_bridge_streaming_stale_task_id_dropped(qapp, tmp_path):
+    """Chunks with an unknown or completed task ID are discarded."""
+    provider = MockStreamingTestProvider(["Chunk"])
+    service = _make_service(provider, tmp_path)
+    bridge = OrionBridge(assistant_service=service)
+
+    chunks_emitted = []
+    bridge.responseChunk.connect(lambda c, tid: chunks_emitted.append((c, tid)))
+
+    # Manually trigger handler with an inactive task ID
+    bridge._handle_worker_chunk("stale_task_id_999", "Stale text")
+    qapp.processEvents()
+
+    assert len(chunks_emitted) == 0
+
+
+def test_bridge_streaming_error_resets_busy_state(qapp, tmp_path):
+    """Streaming failure emits errorOccurred and cleanly clears busy state."""
+
+    class FailingStreamProvider:
+        def stream_response(self, prompt: str, history=None):
+            yield "GoodChunk"
+            raise RuntimeError("Fatal streaming drop")
+
+        def generate_response(self, prompt: str, history=None) -> str:
+            raise RuntimeError("Fatal streaming drop")
+
+    service = _make_service(FailingStreamProvider(), tmp_path)
+    bridge = OrionBridge(assistant_service=service)
+
+    chunks = []
+    errors = []
+
+    bridge.responseChunk.connect(lambda c, tid: chunks.append(c))
+    bridge.errorOccurred.connect(lambda err: errors.append(err))
+
+    bridge.sendMessage("Expect failure")
+    assert bridge.isBusy
+
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert not bridge.isBusy
+    assert len(chunks) == 1
+    assert chunks[0] == "GoodChunk"
+    assert len(errors) == 1
+    assert "Fatal streaming drop" in errors[0]

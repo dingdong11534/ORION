@@ -391,3 +391,226 @@ def test_empty_assistant_response():
             provider.generate_response(prompt="Hello")
 
     assert "empty assistant response" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Streaming inference tests (Milestone 3.4)
+# ---------------------------------------------------------------------------
+
+
+class MockStreamingHTTPResponse:
+    """Mock streaming HTTP response delivering newline-delimited JSON chunks."""
+
+    def __init__(self, chunks: list[str | dict], status: int = 200) -> None:
+        lines: list[bytes] = []
+        for c in chunks:
+            if isinstance(c, dict):
+                lines.append(json.dumps(c).encode("utf-8") + b"\n")
+            elif isinstance(c, str):
+                lines.append(c.encode("utf-8") + b"\n")
+            elif isinstance(c, bytes):
+                lines.append(c + b"\n")
+        self._lines = lines
+        self.status = status
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def read(self) -> bytes:
+        return b"".join(self._lines)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.closed = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_stream_response_multiple_chunks_and_ordering():
+    """Streaming yields chunks in exact incremental order."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Chunk 1: Hello"}, "done": False},
+        {"message": {"role": "assistant", "content": " "}, "done": False},
+        {"message": {"role": "assistant", "content": "Chunk 2: world!"}, "done": False},
+        {"message": {"role": "assistant", "content": ""}, "done": False},  # Empty ignored
+        {"message": {"role": "assistant", "content": None}, "done": False},
+        {"done": True},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Say hello")
+        results = list(stream)
+
+    assert results == ["Chunk 1: Hello", " ", "Chunk 2: world!"]
+    assert "".join(results) == "Chunk 1: Hello Chunk 2: world!"
+
+
+def test_stream_response_payload_structure():
+    """stream_response sends stream=True and think=False by default with keep_alive and options."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Output"}, "done": True},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+        provider = OllamaModelProvider(
+            model_name="qwen3:1.7b",
+            num_ctx=4096,
+            num_predict=128,
+            think=False,
+        )
+        list(provider.stream_response(prompt="Hello"))
+
+    req = mock_urlopen.call_args[0][0]
+    payload = json.loads(req.data.decode("utf-8"))
+    assert payload["model"] == "qwen3:1.7b"
+    assert payload["stream"] is True
+    assert payload["think"] is False
+    assert payload["keep_alive"] == "30s"
+    assert payload["options"]["num_ctx"] == 4096
+    assert payload["options"]["num_predict"] == 128
+
+
+def test_stream_response_think_configurable():
+    """stream_response respects think=True when explicitly set."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Final output"}, "done": True},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+        provider = OllamaModelProvider(think=True)
+        list(provider.stream_response(prompt="Think deeply"))
+
+    req = mock_urlopen.call_args[0][0]
+    payload = json.loads(req.data.decode("utf-8"))
+    assert payload["think"] is True
+
+
+def test_stream_response_unicode_chunks():
+    """stream_response handles multibyte UTF-8 characters across chunks."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "🌟 Привет, "}, "done": False},
+        {"message": {"role": "assistant", "content": "мир! 🌍 🚀"}, "done": True},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        results = list(provider.stream_response(prompt="Unicode test"))
+
+    assert results == ["🌟 Привет, ", "мир! 🌍 🚀"]
+    assert "".join(results) == "🌟 Привет, мир! 🌍 🚀"
+
+
+def test_stream_response_completion_detection_and_premature_end():
+    """Stream without done: true record raises OllamaResponseError."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Partial output"}, "done": False},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Incomplete test")
+        with pytest.raises(OllamaResponseError) as exc_info:
+            list(stream)
+
+    assert "ended prematurely" in str(exc_info.value)
+
+
+def test_stream_response_malformed_json_raises():
+    """Malformed JSON line during streaming raises OllamaResponseError."""
+    mock_resp = MockStreamingHTTPResponse(
+        [
+            '{"message": {"role": "assistant", "content": "Valid"}}\n',
+            "INVALID_JSON_CORRUPT_BYTES\n",
+        ]
+    )
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Malformed test")
+        with pytest.raises(OllamaResponseError) as exc_info:
+            list(stream)
+
+    assert "Malformed JSON chunk" in str(exc_info.value)
+
+
+def test_stream_response_http_404_model_not_found():
+    """HTTP 404 from stream endpoint raises OllamaModelNotFoundError."""
+    err_body = io.BytesIO(b'{"error": "model \'missing_model\' not found"}')
+    http_err = urllib.error.HTTPError(
+        url="http://127.0.0.1:11434/api/chat",
+        code=404,
+        msg="Not Found",
+        hdrs=MagicMock(),
+        fp=err_body,
+    )
+
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        provider = OllamaModelProvider(model_name="missing_model")
+        with pytest.raises(OllamaModelNotFoundError) as exc_info:
+            list(provider.stream_response(prompt="Check 404"))
+
+    assert "missing_model" in str(exc_info.value)
+
+
+def test_stream_response_connection_failure():
+    """URLError during streaming raises OllamaConnectionError."""
+    url_err = urllib.error.URLError(reason="Connection refused")
+
+    with patch("urllib.request.urlopen", side_effect=url_err):
+        provider = OllamaModelProvider()
+        with pytest.raises(OllamaConnectionError) as exc_info:
+            list(provider.stream_response(prompt="Check connection err"))
+
+    assert "Unable to connect to Ollama server" in str(exc_info.value)
+
+
+def test_stream_response_timeout():
+    """Timeout during streaming raises OllamaTimeoutError."""
+    with patch("urllib.request.urlopen", side_effect=TimeoutError("Read timed out")):
+        provider = OllamaModelProvider()
+        with pytest.raises(OllamaTimeoutError) as exc_info:
+            list(provider.stream_response(prompt="Check timeout"))
+
+    assert "timed out" in str(exc_info.value)
+
+
+def test_stream_response_empty_final_response():
+    """Stream containing only empty content chunks raises OllamaResponseError."""
+    chunks = [
+        {"message": {"role": "assistant", "content": ""}, "done": False},
+        {"message": {"role": "assistant", "content": "   "}, "done": False},
+        {"done": True},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Empty test")
+        with pytest.raises(OllamaResponseError) as exc_info:
+            list(stream)
+
+    assert "empty streamed response" in str(exc_info.value)
+
+
+def test_stream_response_closes_underlying_response():
+    """Underlying HTTP response is cleanly closed when generator completes."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Done"}, "done": True},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        list(provider.stream_response(prompt="Close test"))
+
+    assert mock_resp.closed is True

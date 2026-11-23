@@ -608,3 +608,156 @@ def test_interrupted_status_preservation(service_env):
     assert res.status == MessageStatus.INTERRUPTED
     assert res.is_new is False
     assert "interrupted" in res.content.lower() or "cancelled" in res.content.lower()
+
+
+# ---------------------------------------------------------------------------
+# Streaming AssistantService Tests (Milestone 3.4)
+# ---------------------------------------------------------------------------
+
+
+class MockStreamingProvider:
+    def __init__(self, chunks: list[str], crash_after: int | None = None) -> None:
+        self.chunks = chunks
+        self.crash_after = crash_after
+        self.calls: list[dict] = []
+
+    def stream_response(self, prompt: str, history=None):
+        self.calls.append({"prompt": prompt, "history": history})
+        for i, chunk in enumerate(self.chunks):
+            if self.crash_after is not None and i >= self.crash_after:
+                raise RuntimeError("Simulated mid-stream failure")
+            yield chunk
+
+    def generate_response(self, prompt: str, history=None) -> str:
+        return "".join(self.chunks)
+
+
+def test_stream_message_persists_user_and_pending_assistant_before_chunks(service_env):
+    """User message and pending assistant message are written to SQLite before chunks stream."""
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    provider = MockStreamingProvider(["ChunkA", "ChunkB"])
+
+    service = AssistantService(
+        model_provider=provider,
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
+
+    req_id = generate_request_id()
+    stream = service.stream_message("Hello streaming", client_request_id=req_id)
+
+    # Before pulling chunks:
+    # Notice that Python generators don't execute until the first next() call
+    first_chunk = next(stream)
+    assert first_chunk == "ChunkA"
+
+    # Inspect SQLite while stream is active: user message is completed, assistant is pending
+    cid = service.active_conversation_id
+    record = conv_store.get_request(cid, req_id)
+    assert record is not None
+    assert record.user_message.status == MessageStatus.COMPLETED
+    assert record.assistant_message.status == MessageStatus.PENDING
+
+    # Finish stream
+    second_chunk = next(stream)
+    assert second_chunk == "ChunkB"
+    with pytest.raises(StopIteration):
+        next(stream)
+
+    # After completion, assistant is completed with full accumulated text
+    completed_record = conv_store.get_request(cid, req_id)
+    assert completed_record.assistant_message.status == MessageStatus.COMPLETED
+    assert completed_record.assistant_message.content == "ChunkAChunkB"
+
+
+def test_stream_message_no_intermediate_token_writes_to_sqlite(service_env, monkeypatch):
+    """Zero intermediate writes occur to SQLite while tokens are yielding."""
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    provider = MockStreamingProvider(["token1", "token2", "token3"])
+
+    service = AssistantService(
+        model_provider=provider,
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
+
+    complete_calls = []
+    orig_complete = conv_store.complete_request
+
+    def tracked_complete(*args, **kwargs):
+        complete_calls.append(kwargs)
+        return orig_complete(*args, **kwargs)
+
+    monkeypatch.setattr(conv_store, "complete_request", tracked_complete)
+
+    stream = service.stream_message("Test write frequency")
+    chunks_received = []
+    for chunk in stream:
+        chunks_received.append(chunk)
+        # Verify complete_request has not been called during chunk generation
+        assert len(complete_calls) == 0
+
+    assert chunks_received == ["token1", "token2", "token3"]
+    # complete_request called exactly once upon stream completion
+    assert len(complete_calls) == 1
+    assert complete_calls[0]["response_content"] == "token1token2token3"
+
+
+def test_stream_message_failure_midway_persists_failed_status(service_env):
+    """Failure during streaming records failed state in SQLite with user message preserved."""
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    provider = MockStreamingProvider(["Part1", "Part2", "Part3"], crash_after=2)
+
+    service = AssistantService(
+        model_provider=provider,
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
+
+    req_id = generate_request_id()
+    stream = service.stream_message("Trigger crash", client_request_id=req_id)
+
+    received = []
+    with pytest.raises(AssistantServiceError) as exc_info:
+        while True:
+            received.append(next(stream))
+
+    assert received == ["Part1", "Part2"]
+    assert "Simulated mid-stream failure" in str(exc_info.value)
+
+    cid = service.active_conversation_id
+    record = conv_store.get_request(cid, req_id)
+    assert record.user_message.status == MessageStatus.COMPLETED
+    assert record.assistant_message.status == MessageStatus.FAILED
+    assert "Simulated mid-stream failure" in (record.assistant_message.error_message or "")
+
+
+def test_stream_message_history_remains_correct_across_turns(service_env):
+    """Completed streamed turns are fed into subsequent turn's conversation context."""
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    provider = MockStreamingProvider(["Answer turn 1"])
+
+    service = AssistantService(
+        model_provider=provider,
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
+
+    # Turn 1
+    list(service.stream_message("Question turn 1"))
+
+    # Turn 2
+    provider.chunks = ["Answer turn 2"]
+    list(service.stream_message("Question turn 2"))
+
+    assert len(provider.calls) == 2
+    turn2_history = provider.calls[1]["history"]
+    assert len(turn2_history) == 2
+    assert turn2_history[0].role == "user"
+    assert turn2_history[0].content == "Question turn 1"
+    assert turn2_history[1].role == "assistant"
+    assert turn2_history[1].content == "Answer turn 1"

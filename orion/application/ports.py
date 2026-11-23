@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any, Protocol
 
 from orion.application.contracts import (
@@ -23,6 +23,18 @@ class ModelProvider(Protocol):
         history: Sequence[ChatMessage] | None = None,
     ) -> str:
         """Generate a text response for the given prompt and conversation history."""
+        ...
+
+
+class StreamingModelProvider(ModelProvider, Protocol):
+    """Protocol extending ModelProvider to support incremental chunk streaming."""
+
+    def stream_response(
+        self,
+        prompt: str,
+        history: Sequence[ChatMessage] | None = None,
+    ) -> Iterator[str]:
+        """Stream response chunks incrementally for the given prompt and conversation history."""
         ...
 
 

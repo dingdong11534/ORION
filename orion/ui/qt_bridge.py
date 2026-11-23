@@ -51,6 +51,7 @@ class OrionBridge(QObject):
     """
 
     responseReady = Signal(str)
+    responseChunk = Signal(str, str)
     errorOccurred = Signal(str)
     busyChanged = Signal(bool)
 
@@ -101,6 +102,7 @@ class OrionBridge(QObject):
         task_id: str,
         fn: Callable[..., Any],
         *args: Any,
+        pass_signals: bool = False,
         **kwargs: Any,
     ) -> bool:
         """Create and enqueue a background worker with deterministic tracking."""
@@ -109,11 +111,13 @@ class OrionBridge(QObject):
             return False
 
         signals = WorkerSignals(parent=self)
-        worker = Worker(fn, *args, signals=signals, **kwargs)
+        worker_args = (signals, *args) if pass_signals else args
+        worker = Worker(fn, *worker_args, signals=signals, **kwargs)
 
         self._active_workers[task_id] = worker
         self._set_busy(True)
 
+        worker.signals.chunk.connect(self._handle_worker_chunk)
         worker.signals.result.connect(lambda res, tid=task_id: self._handle_worker_result(tid, res))
         worker.signals.error.connect(lambda err, tid=task_id: self._handle_worker_error(tid, err))
         worker.signals.finished.connect(lambda tid=task_id: self._handle_worker_finished(tid))
@@ -229,17 +233,33 @@ class OrionBridge(QObject):
         target_cid = self._service.active_conversation_id
         request_id = generate_request_id()
 
-        def _task() -> tuple[str, Any, list[dict[str, Any]], str]:
-            res = self._service.send_message(
-                trimmed,
-                client_request_id=request_id,
-                conversation_id=target_cid,
+        def _task(signals: WorkerSignals) -> tuple[str, str, list[dict[str, Any]], str]:
+            def _emit_chunk(c: str) -> None:
+                signals.chunk.emit(request_id, c)
+
+            accumulated = list(
+                self._service.stream_message(
+                    trimmed,
+                    client_request_id=request_id,
+                    conversation_id=target_cid,
+                    on_chunk=_emit_chunk,
+                )
             )
+
+            full_text = "".join(accumulated)
             convs = [_conv_to_dict(c) for c in self._service.list_conversations()]
             active_id = self._service.active_conversation_id or ""
-            return ("send_message_result", res, convs, active_id)
+            return ("send_message_stream_result", full_text, convs, active_id)
 
-        self._start_worker(request_id, _task)
+        self._start_worker(request_id, _task, pass_signals=True)
+
+    @Slot(str, str)
+    def _handle_worker_chunk(self, task_id: str, chunk: str) -> None:
+        if self._is_shutting_down:
+            return
+        if task_id not in self._active_workers:
+            return
+        self.responseChunk.emit(chunk, task_id)
 
     @Slot(str, object)
     def _handle_worker_result(self, task_id: str, result: object) -> None:
@@ -273,6 +293,12 @@ class OrionBridge(QObject):
                 if was_active:
                     self.activeConversationChanged.emit("")
                     self.historyLoaded.emit([])
+                return
+            if tag == "send_message_stream_result":
+                _, full_text, convs, active_id = result
+                self.responseReady.emit(full_text)
+                self.conversationsLoaded.emit(convs, active_id)
+                self.activeConversationChanged.emit(active_id)
                 return
             if tag == "send_message_result":
                 _, asst_res, convs, active_id = result

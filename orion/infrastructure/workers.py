@@ -11,6 +11,7 @@ class WorkerSignals(QObject):
     finished = Signal()
     result = Signal(object)
     error = Signal(str)
+    chunk = Signal(str, str)  # (task_id, chunk_text)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)

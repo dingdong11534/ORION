@@ -122,14 +122,19 @@ def test_qml_chat_sending_and_history_population(qml_context):
     composer.setProperty("text", "Hello QML test")
     root.sendMessage()
 
-    # User message added immediately
-    assert chat_model.property("count") == 1
+    # User message and assistant placeholder added immediately
+    assert chat_model.property("count") == 2
+    assert chat_model.get(0).property("role").toVariant() == "user"
+    assert chat_model.get(1).property("role").toVariant() == "assistant"
+    assert chat_model.get(1).property("status").toVariant() == "pending"
 
     bridge._thread_pool.waitForDone(3000)
     app.processEvents()
 
-    # Assistant reply received and added
+    # Assistant reply completed in-place without duplicate message items
     assert chat_model.property("count") == 2
+    assert chat_model.get(1).property("status").toVariant() == "completed"
+    assert "Echoing message" in chat_model.get(1).property("text").toVariant()
 
 
 def test_qml_selecting_conversation_populates_chat_model(qml_context):
