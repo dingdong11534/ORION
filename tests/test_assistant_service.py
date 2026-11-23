@@ -471,3 +471,140 @@ def test_assistant_service_rejects_blank_message(service_env, blank_input: str):
         service.send_message(blank_input)
 
     assert len(provider.calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Milestone 2.4: Conversation Management Tests
+# ---------------------------------------------------------------------------
+
+
+def test_active_conversation_restoration(service_env):
+    """AssistantService restores previously active conversation on startup."""
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    provider = service_env["provider"]
+
+    conv_store.create_conversation("First thread")
+    conv2 = conv_store.create_conversation("Second thread")
+    settings_store.set_setting("active_conversation_id", conv2.id)
+
+    service = AssistantService(provider, conv_store, settings_store)
+    assert service.active_conversation_id == conv2.id
+
+    active = service.get_active_conversation()
+    assert active is not None
+    assert active.id == conv2.id
+    assert active.title == "Second thread"
+
+
+def test_new_conversation_creation(service_env):
+    """create_new_conversation creates DB record and updates active conversation."""
+    service: AssistantService = service_env["service"]
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+
+    conv = service.create_new_conversation("Project Alpha")
+    assert conv.title == "Project Alpha"
+    assert service.active_conversation_id == conv.id
+    assert settings_store.get_setting("active_conversation_id") == conv.id
+
+    # Verify present in store
+    all_convs = conv_store.list_conversations()
+    assert any(c.id == conv.id for c in all_convs)
+
+
+def test_conversation_selection(service_env):
+    """select_conversation switches active conversation and persists setting."""
+    service: AssistantService = service_env["service"]
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+
+    c1 = conv_store.create_conversation("Topic 1")
+    c2 = conv_store.create_conversation("Topic 2")
+
+    selected = service.select_conversation(c1.id)
+    assert selected.id == c1.id
+    assert service.active_conversation_id == c1.id
+    assert settings_store.get_setting("active_conversation_id") == c1.id
+
+    service.select_conversation(c2.id)
+    assert service.active_conversation_id == c2.id
+    assert settings_store.get_setting("active_conversation_id") == c2.id
+
+
+def test_conversation_selection_nonexistent_raises(service_env):
+    """Selecting a nonexistent conversation raises ConversationNotFoundError."""
+    service: AssistantService = service_env["service"]
+    from orion.application.ports import ConversationNotFoundError
+
+    with pytest.raises(ConversationNotFoundError):
+        service.select_conversation("conv_nonexistent_999")
+
+
+def test_deleting_active_conversation_resets_state_and_settings(service_env):
+    """Deleting the active conversation clears in-memory state and persisted setting."""
+    service: AssistantService = service_env["service"]
+    settings_store = service_env["settings_store"]
+
+    conv = service.create_new_conversation("To be deleted")
+    assert service.active_conversation_id == conv.id
+
+    service.delete_conversation(conv.id)
+    assert service.active_conversation_id is None
+    assert settings_store.get_setting("active_conversation_id") is None
+    assert service.get_active_conversation() is None
+
+
+def test_deleting_inactive_conversation_preserves_active_state(service_env):
+    """Deleting an inactive conversation keeps active conversation intact."""
+    service: AssistantService = service_env["service"]
+    settings_store = service_env["settings_store"]
+
+    c_active = service.create_new_conversation("Active conversation")
+    c_inactive = service._conversation_store.create_conversation("Other conversation")
+
+    service.delete_conversation(c_inactive.id)
+    assert service.active_conversation_id == c_active.id
+    assert settings_store.get_setting("active_conversation_id") == c_active.id
+
+
+def test_history_loading_and_ordering(service_env):
+    """get_conversation_messages returns messages in ascending sequence order."""
+    service: AssistantService = service_env["service"]
+    conv = service.create_new_conversation("Ordering test")
+
+    service.send_message("First question", conversation_id=conv.id)
+    service.send_message("Second question", conversation_id=conv.id)
+
+    msgs = service.get_conversation_messages(conv.id)
+    assert len(msgs) == 4
+    assert [m.sequence_number for m in msgs] == [0, 1, 2, 3]
+    assert msgs[0].content == "First question"
+    assert msgs[2].content == "Second question"
+
+
+def test_interrupted_status_preservation(service_env):
+    """Interrupted request returns AssistantResponse with INTERRUPTED status instead of generic crash."""
+    service: AssistantService = service_env["service"]
+    conv_store = service_env["conv_store"]
+
+    conv = service.create_new_conversation("Interrupted test")
+    req_id = generate_request_id()
+
+    # Create request turn and manually set assistant status to interrupted
+    start_res = conv_store.begin_request(req_id, "Long query", conv.id)
+    asst_id = start_res.request.assistant_message.id
+
+    from orion.infrastructure.persistence.models import MessageModel
+
+    with service_env["factory"]() as session:
+        asst_row = session.get(MessageModel, asst_id)
+        asst_row.status = "interrupted"
+        asst_row.error_message = "Cancelled by user"
+        session.commit()
+
+    # Re-sending same request ID returns structured AssistantResponse
+    res = service.send_message("Long query", client_request_id=req_id, conversation_id=conv.id)
+    assert res.status == MessageStatus.INTERRUPTED
+    assert res.is_new is False
+    assert "interrupted" in res.content.lower() or "cancelled" in res.content.lower()

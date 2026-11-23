@@ -66,3 +66,14 @@ def test_check_migration_succeeds_at_expected_revision(tmp_path: Path):
     engine = create_db_engine(db_file)
     # Must not raise
     check_database_migration(engine, expected_revision=_EXPECTED_ALEMBIC_REVISION)
+
+
+def test_check_migration_dynamically_resolves_head_revision(tmp_path: Path):
+    """check_database_migration dynamically resolves head when expected_revision is omitted."""
+    db_file = tmp_path / "dynamic_head.db"
+    db_url = f"sqlite:///{db_file}"
+    _apply_migrations(db_url, revision="head")
+
+    engine = create_db_engine(db_file)
+    # expected_revision=None dynamically inspects Alembic script directory
+    check_database_migration(engine)

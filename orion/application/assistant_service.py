@@ -7,10 +7,13 @@ from orion.application.contracts import (
     AssistantResponse,
     ChatMessage,
     ChatRequest,
+    ConversationSummary,
     MessageStatus,
+    PersistedMessage,
     generate_request_id,
 )
 from orion.application.ports import (
+    ConversationNotFoundError,
     ConversationStore,
     ModelProvider,
     SettingsStore,
@@ -49,10 +52,16 @@ class AssistantService:
         stored_id = self._settings_store.get_setting("active_conversation_id")
         if stored_id and isinstance(stored_id, str):
             try:
-                convs = self._conversation_store.list_conversations(limit=500)
-                if any(c.id == stored_id for c in convs):
-                    self._active_conversation_id = stored_id
-                    return
+                if hasattr(self._conversation_store, "get_conversation"):
+                    conv = self._conversation_store.get_conversation(stored_id)
+                    if conv is not None:
+                        self._active_conversation_id = stored_id
+                        return
+                else:
+                    convs = self._conversation_store.list_conversations(limit=500)
+                    if any(c.id == stored_id for c in convs):
+                        self._active_conversation_id = stored_id
+                        return
                 # Referenced conversation no longer exists: clear stale setting
                 self._settings_store.delete_setting("active_conversation_id")
             except Exception as exc:  # noqa: BLE001
@@ -64,18 +73,112 @@ class AssistantService:
         """Return the current active conversation ID, if any."""
         return self._active_conversation_id
 
+    def get_active_conversation(self) -> ConversationSummary | None:
+        """Return the ConversationSummary for the active conversation, or None."""
+        if self._active_conversation_id is None:
+            return None
+        if hasattr(self._conversation_store, "get_conversation"):
+            conv = self._conversation_store.get_conversation(self._active_conversation_id)
+            if conv is not None:
+                return conv
+        convs = self._conversation_store.list_conversations(limit=500)
+        return next((c for c in convs if c.id == self._active_conversation_id), None)
+
     def set_active_conversation(self, conversation_id: str | None) -> None:
         """Explicitly switch or clear the active conversation."""
         if conversation_id is not None:
+            self.select_conversation(conversation_id)
+            return
+
+        self._active_conversation_id = None
+        if self._settings_store is not None:
+            try:
+                self._settings_store.delete_setting("active_conversation_id")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to delete active_conversation_id setting: %s", exc)
+
+    def select_conversation(self, conversation_id: str) -> ConversationSummary:
+        """Select an existing conversation as the active conversation."""
+        target_conv: ConversationSummary | None = None
+        if hasattr(self._conversation_store, "get_conversation"):
+            target_conv = self._conversation_store.get_conversation(conversation_id)
+        if target_conv is None:
             convs = self._conversation_store.list_conversations(limit=500)
-            if not any(c.id == conversation_id for c in convs):
-                raise ValueError(f"Conversation {conversation_id!r} not found.")
+            target_conv = next((c for c in convs if c.id == conversation_id), None)
+
+        if target_conv is None:
+            raise ConversationNotFoundError(f"Conversation {conversation_id!r} not found.")
+
         self._active_conversation_id = conversation_id
         if self._settings_store is not None:
-            if conversation_id is None:
-                self._settings_store.delete_setting("active_conversation_id")
-            else:
+            try:
                 self._settings_store.set_setting("active_conversation_id", conversation_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist active_conversation_id setting: %s", exc)
+
+        return target_conv
+
+    def create_new_conversation(self, title: str = "New Conversation") -> ConversationSummary:
+        """Explicitly create a new conversation and set it as the active conversation."""
+        try:
+            conv = self._conversation_store.create_conversation(title=title)
+        except Exception as exc:
+            raise AssistantServiceError(f"Failed to create new conversation: {exc}") from exc
+
+        self._active_conversation_id = conv.id
+        if self._settings_store is not None:
+            try:
+                self._settings_store.set_setting("active_conversation_id", conv.id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist active_conversation_id setting: %s", exc)
+
+        return conv
+
+    def delete_conversation(self, conversation_id: str) -> None:
+        """Delete a conversation.
+
+        If deleting the active conversation, resets active conversation state and clears setting.
+        If deleting an inactive conversation, preserves the active conversation.
+        """
+        was_active = self._active_conversation_id == conversation_id
+        try:
+            self._conversation_store.delete_conversation(conversation_id)
+        except Exception as exc:
+            raise AssistantServiceError(
+                f"Failed to delete conversation {conversation_id!r}: {exc}"
+            ) from exc
+
+        if was_active:
+            self._active_conversation_id = None
+            if self._settings_store is not None:
+                try:
+                    self._settings_store.delete_setting("active_conversation_id")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to delete active_conversation_id setting: %s", exc)
+
+    def list_conversations(self, limit: int = 100) -> Sequence[ConversationSummary]:
+        """Return conversations ordered by recent activity (updated_at desc)."""
+        try:
+            return self._conversation_store.list_conversations(limit=limit)
+        except Exception as exc:
+            raise AssistantServiceError(f"Failed to list conversations: {exc}") from exc
+
+    def get_conversation_messages(
+        self, conversation_id: str, limit: int = 100
+    ) -> Sequence[PersistedMessage]:
+        """Return all persisted messages for a conversation in ascending sequence order."""
+        try:
+            return self._conversation_store.load_history(conversation_id, limit=limit)
+        except Exception as exc:
+            raise AssistantServiceError(
+                f"Failed to load messages for conversation {conversation_id!r}: {exc}"
+            ) from exc
+
+    def get_active_conversation_history(self, limit: int = 100) -> Sequence[PersistedMessage]:
+        """Return all persisted messages for the active conversation in ascending sequence order."""
+        if self._active_conversation_id is None:
+            return []
+        return self.get_conversation_messages(self._active_conversation_id, limit=limit)
 
     def get_history(
         self, conversation_id: str | None = None, limit: int = 100
@@ -180,8 +283,16 @@ class AssistantService:
                     content=asst.error_message or "",
                 )
             if asst.status == MessageStatus.INTERRUPTED:
-                raise AssistantServiceError(
-                    f"Request {req.client_request_id!r} was interrupted. A retry must use a new client_request_id."
+                return AssistantResponse(
+                    conversation_id=cid,
+                    client_request_id=req.client_request_id,
+                    user_message=start_result.request.user_message,
+                    assistant_message=asst,
+                    status=MessageStatus.INTERRUPTED,
+                    is_new=False,
+                    content=asst.content
+                    or asst.error_message
+                    or "Request was interrupted. A retry must use a new client_request_id.",
                 )
 
         # C. Load model history

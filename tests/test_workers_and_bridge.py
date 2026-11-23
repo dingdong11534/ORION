@@ -362,3 +362,151 @@ def test_bridge_response_reaches_signal_after_persistence(qapp, tmp_path):
 
     assert len(responses) == 1
     assert len(verified_in_db) == 1
+
+
+# ---------------------------------------------------------------------------
+# Milestone 2.4: Bridge Conversation Management Tests
+# ---------------------------------------------------------------------------
+
+
+def test_initial_state_is_loaded_asynchronously(qapp, tmp_path):
+    """loadInitialState runs in worker and emits conversationsLoaded and historyLoaded."""
+    provider = FakeModelProvider()
+    service = _make_service(provider, tmp_path)
+    c1 = service.create_new_conversation("Stored Chat")
+    service.send_message("Stored question", conversation_id=c1.id)
+
+    bridge = OrionBridge(assistant_service=service)
+    loaded_convs = []
+    loaded_active_id = []
+    loaded_history = []
+
+    bridge.conversationsLoaded.connect(
+        lambda c, a: (loaded_convs.append(c), loaded_active_id.append(a))
+    )
+    bridge.historyLoaded.connect(lambda h: loaded_history.append(h))
+
+    bridge.loadInitialState()
+    assert bridge.isBusy
+
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert not bridge.isBusy
+    assert len(loaded_convs) == 1
+    assert len(loaded_convs[0]) >= 1
+    assert loaded_convs[0][0]["id"] == c1.id
+    assert loaded_active_id[0] == c1.id
+    assert len(loaded_history) == 1
+    assert len(loaded_history[0]) == 2
+    assert loaded_history[0][0]["content"] == "Stored question"
+
+
+def test_conversation_selection_uses_worker(qapp, tmp_path):
+    """selectConversation loads conversation and history asynchronously."""
+    provider = FakeModelProvider()
+    service = _make_service(provider, tmp_path)
+    service.create_new_conversation("Chat 1")
+    c2 = service.create_new_conversation("Chat 2")
+    service.send_message("Chat 2 question", conversation_id=c2.id)
+
+    bridge = OrionBridge(assistant_service=service)
+    switched_ids = []
+    loaded_history = []
+
+    bridge.activeConversationChanged.connect(lambda cid: switched_ids.append(cid))
+    bridge.historyLoaded.connect(lambda h: loaded_history.append(h))
+
+    bridge.selectConversation(c2.id)
+    assert bridge.isBusy
+
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert not bridge.isBusy
+    assert c2.id in switched_ids
+    assert len(loaded_history) == 1
+    assert len(loaded_history[0]) == 2
+    assert loaded_history[0][0]["content"] == "Chat 2 question"
+
+
+def test_new_conversation_operation_uses_worker(qapp, tmp_path):
+    """createNewConversation creates conversation in worker and emits signals."""
+    provider = FakeModelProvider()
+    service = _make_service(provider, tmp_path)
+    bridge = OrionBridge(assistant_service=service)
+
+    created_events = []
+    active_ids = []
+    histories = []
+
+    bridge.conversationCreated.connect(lambda conv: created_events.append(conv))
+    bridge.activeConversationChanged.connect(lambda cid: active_ids.append(cid))
+    bridge.historyLoaded.connect(lambda h: histories.append(h))
+
+    bridge.createNewConversation()
+    assert bridge.isBusy
+
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert not bridge.isBusy
+    assert len(created_events) == 1
+    new_id = created_events[0]["id"]
+    assert new_id in active_ids
+    assert len(histories) == 1
+    assert histories[0] == []
+
+
+def test_delete_operation_uses_worker(qapp, tmp_path):
+    """deleteConversation deletes in background and emits deleted signals."""
+    provider = FakeModelProvider()
+    service = _make_service(provider, tmp_path)
+    c1 = service.create_new_conversation("Delete Me")
+
+    bridge = OrionBridge(assistant_service=service)
+    deleted_ids = []
+    active_ids = []
+    histories = []
+
+    bridge.conversationDeleted.connect(lambda cid: deleted_ids.append(cid))
+    bridge.activeConversationChanged.connect(lambda cid: active_ids.append(cid))
+    bridge.historyLoaded.connect(lambda h: histories.append(h))
+
+    bridge.deleteConversation(c1.id)
+    assert bridge.isBusy
+
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert not bridge.isBusy
+    assert deleted_ids == [c1.id]
+    assert "" in active_ids
+    assert histories == [[]]
+
+
+def test_no_database_operation_runs_on_gui_thread(qapp, tmp_path, monkeypatch):
+    """Verify that database operations occur strictly on non-GUI threads."""
+    main_thread = threading.current_thread()
+    worker_threads = []
+
+    provider = FakeModelProvider()
+    service = _make_service(provider, tmp_path)
+
+    orig_list = service._conversation_store.list_conversations
+
+    def monitored_list(*args, **kwargs):
+        worker_threads.append(threading.current_thread())
+        return orig_list(*args, **kwargs)
+
+    monkeypatch.setattr(service._conversation_store, "list_conversations", monitored_list)
+
+    bridge = OrionBridge(assistant_service=service)
+    bridge.loadInitialState()
+
+    bridge._thread_pool.waitForDone(3000)
+    qapp.processEvents()
+
+    assert len(worker_threads) >= 1
+    for t in worker_threads:
+        assert t != main_thread, "Database operation executed on GUI main thread!"

@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
@@ -22,15 +24,32 @@ from orion.infrastructure.persistence.repositories import (
 )
 from orion.ui.qt_bridge import OrionBridge
 
+# Maintained for backward compatibility with existing tests
 _EXPECTED_ALEMBIC_REVISION = "0002"
 
 
-def check_database_migration(
-    engine: Engine, expected_revision: str = _EXPECTED_ALEMBIC_REVISION
-) -> None:
-    """Verify that the database file exists and is migrated to expected revision.
+def get_alembic_head_revision(ini_path: Path | None = None) -> str:
+    """Dynamically determine the current head revision from the Alembic script directory."""
+    if ini_path is None:
+        ini_path = Path(__file__).resolve().parent.parent / "alembic.ini"
+    if not ini_path.exists():
+        raise RuntimeError(f"Alembic configuration file not found at '{ini_path}'.")
+    cfg = Config(str(ini_path))
+    script = ScriptDirectory.from_config(cfg)
+    head = script.get_current_head()
+    if head is None:
+        raise RuntimeError("No Alembic revisions found in migrations directory.")
+    return head
 
-    Does NOT auto-upgrade during normal startup. Raises RuntimeError if unmigrated.
+
+def check_database_migration(
+    engine: Engine,
+    expected_revision: str | None = None,
+    ini_path: Path | None = None,
+) -> None:
+    """Verify that the database file exists and is migrated to expected/head revision.
+
+    Does NOT auto-upgrade during normal startup. Raises RuntimeError if unmigrated or outdated.
     """
     db_file_str = engine.url.database
     db_file = Path(db_file_str) if db_file_str else None
@@ -40,6 +59,9 @@ def check_database_migration(
             "Please initialize and migrate the database using:\n"
             "  .venv/bin/alembic upgrade head"
         )
+
+    if expected_revision is None:
+        expected_revision = get_alembic_head_revision(ini_path)
 
     with engine.connect() as conn:
         has_version_table = conn.execute(
@@ -73,7 +95,7 @@ def main() -> int:
     engine = create_db_engine(db_path)
     init_database(engine, apply_wal=True)
 
-    # 3. Verify that the required Alembic migration has been applied
+    # 3. Verify that the required Alembic migration has been applied (dynamically checking head)
     try:
         check_database_migration(engine)
     except RuntimeError as exc:

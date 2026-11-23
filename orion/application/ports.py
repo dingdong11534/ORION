@@ -46,6 +46,14 @@ class ConversationStore(Protocol):
         """
         ...
 
+    def get_conversation(self, conversation_id: str) -> ConversationSummary | None:
+        """Return the ConversationSummary for conversation_id, or None if absent.
+
+        Raises:
+            PersistenceError: On database failure.
+        """
+        ...
+
     def list_conversations(
         self, limit: int = _DEFAULT_HISTORY_LIMIT
     ) -> Sequence[ConversationSummary]:

@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 ApplicationWindow {
     id: root
+    objectName: "mainWindow"
 
     visible: true
     width: 1100
@@ -15,15 +16,30 @@ ApplicationWindow {
     color: "#F4F1E9"
 
     readonly property bool busy: (typeof orion !== "undefined" && orion !== null) ? orion.isBusy : false
+    property string activeConversationId: (typeof orion !== "undefined" && orion !== null) ? orion.activeConversationId : ""
+    property bool isInitializing: true
+
+    property string pendingDeleteId: ""
+    property string pendingDeleteTitle: ""
+
+    ListModel {
+        id: conversationsModel
+        objectName: "conversationsModel"
+    }
 
     ListModel {
         id: chatModel
+        objectName: "chatModel"
+    }
 
-        ListElement {
-            role: "assistant"
-            text: "Hello. I'm ORION. Your desktop interface and Python core are connected.\n(Simulated mode: local AI model not connected yet)"
-            isError: false
+    function getActiveTitle() {
+        if (!root.activeConversationId)
+            return "New Chat"
+        for (let i = 0; i < conversationsModel.count; i++) {
+            if (conversationsModel.get(i).id === root.activeConversationId)
+                return conversationsModel.get(i).title
         }
+        return "Assistant"
     }
 
     function sendMessage() {
@@ -35,6 +51,7 @@ ApplicationWindow {
         chatModel.append({
             role: "user",
             text: message,
+            status: "completed",
             isError: false
         })
 
@@ -47,13 +64,78 @@ ApplicationWindow {
         })
     }
 
+    function openDeleteConfirmation(convId, title) {
+        root.pendingDeleteId = convId
+        root.pendingDeleteTitle = title
+        deleteDialog.visible = true
+    }
+
+    Component.onCompleted: {
+        if (typeof orion !== "undefined" && orion !== null) {
+            orion.loadInitialState()
+        } else {
+            root.isInitializing = false
+        }
+    }
+
     Connections {
         target: orion
+
+        function onConversationsLoaded(convs, activeId) {
+            conversationsModel.clear()
+            for (let i = 0; i < convs.length; i++) {
+                conversationsModel.append(convs[i])
+            }
+            root.activeConversationId = activeId
+        }
+
+        function onActiveConversationChanged(convId) {
+            root.activeConversationId = convId
+        }
+
+        function onHistoryLoaded(messages) {
+            chatModel.clear()
+            for (let i = 0; i < messages.length; i++) {
+                const msg = messages[i]
+                let isErr = (msg.status === "failed" || msg.status === "interrupted")
+                let displayText = msg.content
+                if (!displayText && msg.error_message) {
+                    displayText = msg.error_message
+                }
+                if (!displayText && msg.status === "interrupted") {
+                    displayText = "Request was interrupted. A retry must use a new client_request_id."
+                }
+                chatModel.append({
+                    role: msg.role,
+                    text: displayText || "",
+                    status: msg.status,
+                    isError: isErr
+                })
+            }
+            root.isInitializing = false
+            Qt.callLater(function() {
+                chatList.positionViewAtEnd()
+            })
+        }
+
+        function onConversationCreated(conversation) {
+            root.activeConversationId = conversation.id
+            chatModel.clear()
+            root.isInitializing = false
+        }
+
+        function onConversationDeleted(conversationId) {
+            if (root.activeConversationId === conversationId) {
+                root.activeConversationId = ""
+                chatModel.clear()
+            }
+        }
 
         function onResponseReady(replyText) {
             chatModel.append({
                 role: "assistant",
                 text: replyText,
+                status: "completed",
                 isError: false
             })
 
@@ -66,6 +148,7 @@ ApplicationWindow {
             chatModel.append({
                 role: "assistant",
                 text: "Error: " + errorMessage,
+                status: "failed",
                 isError: true
             })
 
@@ -80,9 +163,11 @@ ApplicationWindow {
         anchors.margins: 18
         spacing: 18
 
-        // Sidebar
+        // ==========================================
+        // Sidebar: Real Conversation Navigator
+        // ==========================================
         Rectangle {
-            Layout.preferredWidth: 235
+            Layout.preferredWidth: 250
             Layout.fillHeight: true
 
             radius: 22
@@ -90,23 +175,24 @@ ApplicationWindow {
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 22
-                spacing: 18
+                anchors.margins: 20
+                spacing: 14
 
+                // App Brand
                 RowLayout {
                     spacing: 12
 
                     Rectangle {
-                        Layout.preferredWidth: 38
-                        Layout.preferredHeight: 38
-                        radius: 12
+                        Layout.preferredWidth: 36
+                        Layout.preferredHeight: 36
+                        radius: 11
                         color: "#526D5B"
 
                         Text {
                             anchors.centerIn: parent
                             text: "O"
                             color: "white"
-                            font.pixelSize: 23
+                            font.pixelSize: 21
                             font.bold: true
                         }
                     }
@@ -116,17 +202,51 @@ ApplicationWindow {
 
                         Text {
                             text: "ORION"
-                            font.pixelSize: 19
+                            font.pixelSize: 18
                             font.bold: true
                             color: "#303A32"
                         }
 
                         Text {
                             text: "PERSONAL ASSISTANT"
-                            font.pixelSize: 9
+                            font.pixelSize: 8
                             font.letterSpacing: 1.2
                             color: "#74796E"
                         }
+                    }
+                }
+
+                // New Chat Button
+                Button {
+                    id: newChatButton
+                    objectName: "newChatButton"
+                    Layout.fillWidth: true
+                    implicitHeight: 38
+                    enabled: !root.busy
+
+                    onClicked: {
+                        if (typeof orion !== "undefined" && orion !== null) {
+                            orion.createNewConversation()
+                        }
+                    }
+
+                    background: Rectangle {
+                        radius: 10
+                        color: !newChatButton.enabled
+                               ? "#B8BFB6"
+                               : (newChatButton.down ? "#3C5547" : "#526D5B")
+                    }
+
+                    contentItem: RowLayout {
+                        spacing: 8
+                        Item { Layout.fillWidth: true }
+                        Text {
+                            text: "+  New Chat"
+                            color: "white"
+                            font.pixelSize: 13
+                            font.bold: true
+                        }
+                        Item { Layout.fillWidth: true }
                     }
                 }
 
@@ -136,60 +256,113 @@ ApplicationWindow {
                     color: "#D3D0C5"
                 }
 
+                // Section title
                 Text {
-                    text: "WORKSPACE"
+                    text: "CONVERSATIONS"
                     font.pixelSize: 10
                     font.bold: true
                     font.letterSpacing: 1.5
                     color: "#85877C"
                 }
 
-                Rectangle {
+                // Scrollable Conversation List
+                ListView {
+                    id: convList
                     Layout.fillWidth: true
-                    height: 42
-                    radius: 11
-                    color: "#D9E0D5"
+                    Layout.fillHeight: true
+                    clip: true
+                    spacing: 4
+                    model: conversationsModel
 
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 13
-                        spacing: 11
+                    delegate: Rectangle {
+                        id: convItem
+                        width: convList.width
+                        height: 38
+                        radius: 9
 
-                        Text {
-                            text: "◉"
-                            color: "#526D5B"
-                            font.pixelSize: 17
+                        readonly property bool isSelected: model.id === root.activeConversationId
+                        readonly property bool isHovered: itemMouseArea.containsMouse
+
+                        color: isSelected ? "#D9E0D5" : (isHovered ? "#E1DDD2" : "transparent")
+                        border.width: isSelected ? 1 : 0
+                        border.color: isSelected ? "#C6CEBF" : "transparent"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 8
+                            spacing: 8
+
+                            Text {
+                                text: "💬"
+                                font.pixelSize: 12
+                                opacity: isSelected ? 0.9 : 0.5
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: model.title
+                                elide: Text.ElideRight
+                                font.pixelSize: 13
+                                font.bold: isSelected
+                                color: isSelected ? "#2E3B30" : "#555A51"
+                            }
+
+                            // Delete button (visible on hover or when selected)
+                            Rectangle {
+                                id: deleteBtn
+                                width: 22
+                                height: 22
+                                radius: 6
+                                visible: isHovered || isSelected
+                                color: deleteMouseArea.containsMouse ? "#FCE8E6" : "transparent"
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "✕"
+                                    font.pixelSize: 11
+                                    color: deleteMouseArea.containsMouse ? "#C53929" : "#898B80"
+                                }
+
+                                MouseArea {
+                                    id: deleteMouseArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    enabled: !root.busy
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.openDeleteConfirmation(model.id, model.title)
+                                    }
+                                }
+                            }
                         }
 
-                        Text {
-                            text: "Assistant"
-                            color: "#394B3E"
-                            font.pixelSize: 14
-                            font.bold: true
+                        MouseArea {
+                            id: itemMouseArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            enabled: !root.busy
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (model.id !== root.activeConversationId) {
+                                    orion.selectConversation(model.id)
+                                }
+                            }
                         }
                     }
-                }
 
-                Text {
-                    text: "○   Memory"
-                    color: "#696E65"
-                    font.pixelSize: 14
-                }
+                    // Empty state when no conversations exist
+                    Text {
+                        anchors.centerIn: parent
+                        text: "No conversations yet"
+                        font.pixelSize: 12
+                        color: "#9C9E94"
+                        visible: conversationsModel.count === 0 && !root.isInitializing
+                    }
 
-                Text {
-                    text: "○   Activity"
-                    color: "#696E65"
-                    font.pixelSize: 14
-                }
-
-                Text {
-                    text: "○   Projects"
-                    color: "#696E65"
-                    font.pixelSize: 14
-                }
-
-                Item {
-                    Layout.fillHeight: true
+                    ScrollBar.vertical: ScrollBar {
+                        policy: ScrollBar.AsNeeded
+                    }
                 }
 
                 Rectangle {
@@ -231,7 +404,9 @@ ApplicationWindow {
             }
         }
 
-        // Main workspace
+        // ==========================================
+        // Main Workspace: Chat Panel & Input
+        // ==========================================
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -244,7 +419,7 @@ ApplicationWindow {
             ColumnLayout {
                 anchors.fill: parent
                 anchors.margins: 26
-                spacing: 18
+                spacing: 16
 
                 // Header
                 RowLayout {
@@ -254,15 +429,16 @@ ApplicationWindow {
                         spacing: 4
 
                         Text {
-                            text: "Assistant"
-                            font.pixelSize: 25
+                            text: root.getActiveTitle()
+                            font.pixelSize: 22
                             font.bold: true
                             color: "#303A32"
+                            elide: Text.ElideRight
                         }
 
                         Text {
-                            text: "Your personal workspace"
-                            font.pixelSize: 13
+                            text: root.activeConversationId ? "Active persistent session" : "Start a new conversation"
+                            font.pixelSize: 12
                             color: "#898B80"
                         }
                     }
@@ -293,63 +469,155 @@ ApplicationWindow {
                     color: "#ECEAE3"
                 }
 
-                // Conversation
-                ListView {
-                    id: chatList
-
+                // Message Area (Loading, Empty, or Message List)
+                Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
 
-                    clip: true
-                    spacing: 12
-                    model: chatModel
+                    // 1. Initial Loading State
+                    ColumnLayout {
+                        anchors.centerIn: parent
+                        spacing: 12
+                        visible: root.isInitializing
 
-                    delegate: Item {
-                        width: chatList.width
-                        height: bubble.height + 8
+                        Rectangle {
+                            Layout.alignment: Qt.AlignHCenter
+                            width: 36
+                            height: 36
+                            radius: 18
+                            color: "#EAE7DF"
 
-                        Row {
-                            width: parent.width
-                            layoutDirection: model.role === "user"
-                                             ? Qt.RightToLeft
-                                             : Qt.LeftToRight
-
-                            Rectangle {
-                                id: bubble
-
-                                width: Math.min(
-                                    chatList.width * 0.78,
-                                    Math.max(120, bubbleText.implicitWidth + 34)
-                                )
-
-                                height: bubbleText.implicitHeight + 24
-                                radius: 15
-
-                                color: model.isError
-                                       ? "#FCE8E6"
-                                       : (model.role === "user" ? "#E4EAE1" : "#F0EEE8")
-                                border.width: model.isError ? 1 : 0
-                                border.color: model.isError ? "#E5A9A4" : "transparent"
-
-                                Text {
-                                    id: bubbleText
-
-                                    x: 17
-                                    y: 12
-                                    width: Math.min(implicitWidth, chatList.width * 0.78 - 34)
-
-                                    text: model.text
-                                    wrapMode: Text.Wrap
-
-                                    color: model.isError ? "#9C2B27" : "#384139"
-                                    font.pixelSize: 14
-                                    lineHeight: 1.35
-                                }
+                            Text {
+                                anchors.centerIn: parent
+                                text: "⏳"
+                                font.pixelSize: 16
                             }
+                        }
+
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "Loading conversations..."
+                            color: "#898B80"
+                            font.pixelSize: 14
                         }
                     }
 
-                    ScrollBar.vertical: ScrollBar {}
+                    // 2. Empty Workspace State (No active messages)
+                    ColumnLayout {
+                        anchors.centerIn: parent
+                        spacing: 14
+                        visible: !root.isInitializing && chatModel.count === 0
+
+                        Rectangle {
+                            Layout.alignment: Qt.AlignHCenter
+                            width: 48
+                            height: 48
+                            radius: 24
+                            color: "#E8EFE5"
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✦"
+                                font.pixelSize: 22
+                                color: "#526D5B"
+                            }
+                        }
+
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "How can I help you today?"
+                            font.pixelSize: 19
+                            font.bold: true
+                            color: "#303A32"
+                        }
+
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "Type a message below or start a new conversation."
+                            font.pixelSize: 13
+                            color: "#898B80"
+                        }
+                    }
+
+                    // 3. Active Chat ListView
+                    ListView {
+                        id: chatList
+                        anchors.fill: parent
+                        clip: true
+                        spacing: 12
+                        model: chatModel
+                        visible: !root.isInitializing && chatModel.count > 0
+
+                        delegate: Item {
+                            width: chatList.width
+                            height: bubble.height + 8
+
+                            Row {
+                                width: parent.width
+                                layoutDirection: model.role === "user"
+                                                 ? Qt.RightToLeft
+                                                 : Qt.LeftToRight
+
+                                Rectangle {
+                                    id: bubble
+
+                                    width: Math.min(
+                                        chatList.width * 0.78,
+                                        Math.max(120, bubbleContent.implicitWidth + 34)
+                                    )
+                                    height: bubbleContent.implicitHeight + 24
+                                    radius: 15
+
+                                    color: {
+                                        if (model.status === "failed") return "#FCE8E6"
+                                        if (model.status === "interrupted") return "#FFF3E0"
+                                        return model.role === "user" ? "#E4EAE1" : "#F0EEE8"
+                                    }
+                                    border.width: model.isError ? 1 : 0
+                                    border.color: {
+                                        if (model.status === "failed") return "#E5A9A4"
+                                        if (model.status === "interrupted") return "#FFE0B2"
+                                        return "transparent"
+                                    }
+
+                                    ColumnLayout {
+                                        id: bubbleContent
+                                        x: 17
+                                        y: 12
+                                        width: Math.min(implicitWidth, chatList.width * 0.78 - 34)
+                                        spacing: 4
+
+                                        // Status badge for failed or interrupted messages
+                                        Text {
+                                            visible: model.isError
+                                            text: model.status === "interrupted" ? "INTERRUPTED" : "FAILED"
+                                            font.pixelSize: 10
+                                            font.bold: true
+                                            color: model.status === "interrupted" ? "#D97706" : "#C53929"
+                                        }
+
+                                        Text {
+                                            id: bubbleText
+                                            Layout.fillWidth: true
+                                            text: model.text
+                                            wrapMode: Text.Wrap
+                                            color: {
+                                                if (model.status === "failed") return "#9C2B27"
+                                                if (model.status === "interrupted") return "#92400E"
+                                                return "#384139"
+                                            }
+                                            font.pixelSize: 14
+                                            lineHeight: 1.35
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        ScrollBar.vertical: ScrollBar {
+                            policy: ScrollBar.AsNeeded
+                        }
+                    }
                 }
 
                 // Message composer
@@ -370,6 +638,7 @@ ApplicationWindow {
 
                         TextField {
                             id: composer
+                            objectName: "composer"
 
                             Layout.fillWidth: true
                             enabled: !root.busy
@@ -385,12 +654,12 @@ ApplicationWindow {
                             }
 
                             selectByMouse: true
-
                             onAccepted: root.sendMessage()
                         }
 
                         Button {
                             id: sendButton
+                            objectName: "sendButton"
 
                             enabled: !root.busy && composer.text.trim().length > 0
                             text: root.busy ? "Wait..." : "Send"
@@ -424,6 +693,111 @@ ApplicationWindow {
                     color: "#A0A094"
                     font.pixelSize: 10
                     horizontalAlignment: Text.AlignHCenter
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // Delete Confirmation Modal Dialog
+    // ==========================================
+    Rectangle {
+        id: deleteDialog
+        objectName: "deleteDialog"
+        visible: false
+        anchors.fill: parent
+        color: "#66000000"
+        z: 999
+
+        // Consume mouse clicks outside dialog card
+        MouseArea {
+            anchors.fill: parent
+            onClicked: {}
+        }
+
+        Rectangle {
+            width: 380
+            height: 180
+            radius: 18
+            color: "#FCFBF8"
+            anchors.centerIn: parent
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 22
+                spacing: 14
+
+                Text {
+                    text: "Delete Conversation"
+                    font.pixelSize: 17
+                    font.bold: true
+                    color: "#303A32"
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "Are you sure you want to delete \"" + root.pendingDeleteTitle + "\"? All messages in this conversation will be permanently removed."
+                    font.pixelSize: 13
+                    color: "#666B62"
+                    wrapMode: Text.Wrap
+                }
+
+                Item {
+                    Layout.fillHeight: true
+                }
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignRight
+                    spacing: 10
+
+                    Button {
+                        text: "Cancel"
+                        implicitWidth: 80
+                        implicitHeight: 36
+                        onClicked: {
+                            deleteDialog.visible = false
+                        }
+
+                        background: Rectangle {
+                            radius: 9
+                            color: "#EBE8DF"
+                        }
+
+                        contentItem: Text {
+                            text: "Cancel"
+                            color: "#4A5247"
+                            font.pixelSize: 13
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                    }
+
+                    Button {
+                        text: "Delete"
+                        implicitWidth: 80
+                        implicitHeight: 36
+                        onClicked: {
+                            deleteDialog.visible = false
+                            if (typeof orion !== "undefined" && orion !== null) {
+                                orion.deleteConversation(root.pendingDeleteId)
+                            }
+                        }
+
+                        background: Rectangle {
+                            radius: 9
+                            color: "#D9534F"
+                        }
+
+                        contentItem: Text {
+                            text: "Delete"
+                            color: "white"
+                            font.pixelSize: 13
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                    }
                 }
             }
         }

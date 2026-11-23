@@ -290,3 +290,54 @@ def test_assistant_service_multiturn_persistence_and_recreation(tmp_path: Path):
     hist_resumed = conv_store.load_history(cid, limit=100)
     assert len(hist_resumed) == 8
     assert [m.sequence_number for m in hist_resumed] == list(range(8))
+
+
+def test_multiturn_multiconversation_workflow_and_restart(tmp_path: Path):
+    """Create multiple conversations, send messages, restart service, verify persistence."""
+    from orion.application.assistant_service import AssistantService
+    from orion.infrastructure.fake_model_provider import FakeModelProvider
+
+    db_file = tmp_path / "orion" / "multi_conv.db"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    db_url = f"sqlite:///{db_file}"
+    _apply_migrations(db_url)
+
+    engine = create_db_engine(db_file)
+    factory = create_session_factory(engine)
+    conv_store = SqliteConversationStore(factory)
+    settings_store = SqliteSettingsStore(factory)
+    provider = FakeModelProvider()
+
+    # Session 1: Create 2 conversations and chat in both
+    s1 = AssistantService(provider, conv_store, settings_store)
+    convA = s1.create_new_conversation("Alpha Thread")
+    s1.send_message("Alpha 1", conversation_id=convA.id)
+    s1.send_message("Alpha 2", conversation_id=convA.id)
+
+    convB = s1.create_new_conversation("Beta Thread")
+    s1.send_message("Beta 1", conversation_id=convB.id)
+
+    assert s1.active_conversation_id == convB.id
+
+    # Session 2: Fresh AssistantService pointing to the same persistent store
+    s2 = AssistantService(provider, conv_store, settings_store)
+    # Active conversation restored to Beta
+    assert s2.active_conversation_id == convB.id
+    beta_msgs = s2.get_active_conversation_history()
+    assert len(beta_msgs) == 2
+    assert beta_msgs[0].content == "Beta 1"
+
+    # Switch to Alpha and verify history
+    s2.select_conversation(convA.id)
+    assert s2.active_conversation_id == convA.id
+    alpha_msgs = s2.get_active_conversation_history()
+    assert len(alpha_msgs) == 4
+    assert alpha_msgs[0].content == "Alpha 1"
+    assert alpha_msgs[2].content == "Alpha 2"
+
+    # Send new message in Alpha and verify sequence
+    res = s2.send_message("Alpha 3")
+    assert res.conversation_id == convA.id
+    alpha_updated = s2.get_active_conversation_history()
+    assert len(alpha_updated) == 6
+    assert alpha_updated[4].content == "Alpha 3"

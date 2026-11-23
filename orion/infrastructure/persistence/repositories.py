@@ -275,6 +275,18 @@ class SqliteConversationStore:
 
         return _with_busy_retry(_run)
 
+    def get_conversation(self, conversation_id: str) -> ConversationSummary | None:
+        """Return ConversationSummary for conversation_id, or None if absent."""
+
+        def _run() -> ConversationSummary | None:
+            with self._factory() as session:
+                conv = session.get(ConversationModel, conversation_id)
+                if conv is None:
+                    return None
+                return _conv_to_summary(conv)
+
+        return _with_busy_retry(_run)
+
     def list_conversations(self, limit: int = 100) -> Sequence[ConversationSummary]:
         """Return conversations ordered by updated_at descending."""
 
