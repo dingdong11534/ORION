@@ -521,7 +521,7 @@ class MockStreamingTestProvider:
     def __init__(self, chunks: list[str]) -> None:
         self.chunks = chunks
 
-    def stream_response(self, prompt: str, history=None):
+    def stream_response(self, prompt: str, history=None, cancellation_token=None):
         yield from self.chunks
 
     def generate_response(self, prompt: str, history=None) -> str:
@@ -581,7 +581,7 @@ def test_bridge_streaming_error_resets_busy_state(qapp, tmp_path):
     """Streaming failure emits errorOccurred and cleanly clears busy state."""
 
     class FailingStreamProvider:
-        def stream_response(self, prompt: str, history=None):
+        def stream_response(self, prompt: str, history=None, cancellation_token=None):
             yield "GoodChunk"
             raise RuntimeError("Fatal streaming drop")
 
@@ -608,3 +608,59 @@ def test_bridge_streaming_error_resets_busy_state(qapp, tmp_path):
     assert chunks[0] == "GoodChunk"
     assert len(errors) == 1
     assert "Fatal streaming drop" in errors[0]
+
+
+def test_bridge_stop_generation_cancels_and_emits_interrupted(qapp, tmp_path):
+    """Calling stopGeneration cooperative cancels generation, emits responseInterrupted, and resets busy."""
+    provider = FakeModelProvider(chunk_delay=0.08, fixed_response="Word1 Word2 Word3 Word4 Word5")
+    service = _make_service(provider, tmp_path)
+    bridge = OrionBridge(assistant_service=service)
+
+    chunks = []
+    interrupted_events = []
+    ready_events = []
+    errors = []
+
+    bridge.responseChunk.connect(lambda c, tid: chunks.append(c))
+    bridge.responseInterrupted.connect(
+        lambda partial, tid: interrupted_events.append((partial, tid))
+    )
+    bridge.responseReady.connect(lambda text: ready_events.append(text))
+    bridge.errorOccurred.connect(lambda err: errors.append(err))
+
+    bridge.sendMessage("Say five words")
+    assert bridge.isBusy
+
+    # Wait until at least 1 chunk is emitted
+    start = time.time()
+    while not chunks and time.time() - start < 3.0:
+        qapp.processEvents()
+        time.sleep(0.02)
+
+    assert len(chunks) >= 1
+
+    # Trigger stopGeneration
+    bridge.stopGeneration()
+
+    bridge._thread_pool.waitForDone(4000)
+    qapp.processEvents()
+
+    assert not bridge.isBusy
+    assert len(ready_events) == 0  # Not completed normally
+    assert len(interrupted_events) == 1
+    partial_text, req_id = interrupted_events[0]
+    assert req_id.startswith("req_")
+    assert len(partial_text) > 0
+    # No errorOccurred signal was emitted for intentional cancellation
+    assert len(errors) == 0
+
+
+def test_bridge_stop_generation_idle_noop(qapp, tmp_path):
+    """Calling stopGeneration when idle does nothing and does not fail."""
+    provider = FakeModelProvider()
+    service = _make_service(provider, tmp_path)
+    bridge = OrionBridge(assistant_service=service)
+
+    bridge.stopGeneration()
+    qapp.processEvents()
+    assert not bridge.isBusy

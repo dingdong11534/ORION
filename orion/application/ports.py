@@ -3,6 +3,7 @@ from typing import Any, Protocol
 
 from orion.application.contracts import (
     ActivityEvent,
+    CancellationToken,
     ChatMessage,
     ConversationSummary,
     PersistedMessage,
@@ -33,6 +34,7 @@ class StreamingModelProvider(ModelProvider, Protocol):
         self,
         prompt: str,
         history: Sequence[ChatMessage] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[str]:
         """Stream response chunks incrementally for the given prompt and conversation history."""
         ...
@@ -190,6 +192,27 @@ class ConversationStore(Protocol):
             ValueError: If error_message is blank.
             RequestNotFoundError: If the assistant message is not found.
             InvalidStateTransitionError: If not currently pending.
+            PersistenceError: On database failure.
+        """
+        ...
+
+    def interrupt_request(
+        self,
+        conversation_id: str,
+        client_request_id: str,
+        partial_content: str | None = None,
+        reason: str | None = None,
+    ) -> PersistedMessage:
+        """Mark the assistant message as interrupted.
+
+        Transitions only from pending. Preserves generated partial content and sets
+        the interruption reason.
+        If already interrupted with identical content and reason, returns the existing record (idempotent).
+        If already completed or failed, raises InvalidStateTransitionError.
+
+        Raises:
+            RequestNotFoundError: If the assistant message is not found.
+            InvalidStateTransitionError: If the message is not in pending state.
             PersistenceError: On database failure.
         """
         ...

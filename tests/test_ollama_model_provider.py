@@ -8,9 +8,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from orion.application.contracts import ChatMessage
+from orion.application.contracts import CancellationToken, ChatMessage
 from orion.infrastructure.ollama_model_provider import (
     OllamaAPIError,
+    OllamaCancelledError,
     OllamaConnectionError,
     OllamaModelNotFoundError,
     OllamaModelProvider,
@@ -613,4 +614,191 @@ def test_stream_response_closes_underlying_response():
         provider = OllamaModelProvider()
         list(provider.stream_response(prompt="Close test"))
 
+    assert mock_resp.closed is True
+
+
+# ---------------------------------------------------------------------------
+# Cooperative Cancellation Tests (Milestone 3.5)
+# ---------------------------------------------------------------------------
+
+
+def test_stream_response_cancellation_before_start():
+    """Cancelled token before streaming begins raises OllamaCancelledError immediately."""
+    token = CancellationToken()
+    token.cancel()
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Pre-cancelled test", cancellation_token=token)
+        with pytest.raises(OllamaCancelledError) as exc_info:
+            next(stream)
+
+    assert "cancelled before starting" in str(exc_info.value).lower()
+    mock_urlopen.assert_not_called()
+
+
+def test_stream_response_cancellation_during_stream():
+    """Cancelling token while iterating chunks raises OllamaCancelledError and closes response."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Chunk1"}, "done": False},
+        {"message": {"role": "assistant", "content": "Chunk2"}, "done": False},
+        {"message": {"role": "assistant", "content": "Chunk3"}, "done": False},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+    token = CancellationToken()
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Mid-stream cancel", cancellation_token=token)
+
+        c1 = next(stream)
+        assert c1 == "Chunk1"
+
+        # Cancel token after first chunk
+        token.cancel()
+
+        with pytest.raises(OllamaCancelledError) as exc_info:
+            next(stream)
+
+    assert "cancelled by user" in str(exc_info.value)
+    assert mock_resp.closed is True
+
+
+def test_stream_response_cancellation_socket_shutdown_and_close():
+    """Cancelling token triggers registered socket shutdown and response closure."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Chunk1"}, "done": False},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+    mock_sock = MagicMock()
+    mock_fp = MagicMock()
+    mock_fp.raw._sock = mock_sock
+    mock_resp.fp = mock_fp
+
+    token = CancellationToken()
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Socket shutdown test", cancellation_token=token)
+        next(stream)
+
+        # Trigger cancellation
+        token.cancel()
+
+    mock_sock.shutdown.assert_called_once()
+    assert mock_resp.closed is True
+
+
+def test_stream_response_cancellation_distinct_from_connection_error():
+    """Socket error caused by intentional cancellation is not treated as OllamaConnectionError."""
+    token = CancellationToken()
+
+    class InterruptedStreamingHTTPResponse(MockStreamingHTTPResponse):
+        def __iter__(self):
+            yield (
+                json.dumps({"message": {"role": "assistant", "content": "First"}}).encode("utf-8")
+                + b"\n"
+            )
+            # Simulate socket being shut down mid-stream
+            token.cancel()
+            raise OSError("Socket closed during read")
+
+    mock_resp = InterruptedStreamingHTTPResponse([])
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Distinction test", cancellation_token=token)
+        assert next(stream) == "First"
+
+        with pytest.raises(OllamaCancelledError) as exc_info:
+            next(stream)
+
+    assert "cancelled by user" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3.5.2 — _cancel_response_socket helper tests (Part B)
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_response_socket_when_fp_is_none():
+    """_cancel_response_socket is a no-op when resp.fp is already None (normal completion)."""
+    mock_resp = MagicMock()
+    mock_resp.fp = None  # Simulates post-completion state set by _close_conn()
+    # Must not raise
+    OllamaModelProvider._cancel_response_socket(mock_resp)
+    mock_resp.close.assert_called_once()
+
+
+def test_cancel_response_socket_oserror_on_shutdown_does_not_propagate():
+    """OSError during sock.shutdown() is caught silently (concurrent closure race)."""
+    mock_sock = MagicMock()
+    mock_sock.shutdown.side_effect = OSError(9, "Bad file descriptor")
+    mock_fp = MagicMock()
+    mock_fp.raw._sock = mock_sock
+    mock_resp = MagicMock()
+    mock_resp.fp = mock_fp
+    # Must not raise
+    OllamaModelProvider._cancel_response_socket(mock_resp)
+    mock_sock.shutdown.assert_called_once()
+    # close() may or may not have been attempted; resp.close() should still be called
+    mock_resp.close.assert_called_once()
+
+
+def test_cancel_response_socket_oserror_on_close_does_not_propagate():
+    """OSError during sock.close() is caught silently."""
+    mock_sock = MagicMock()
+    mock_sock.shutdown.return_value = None
+    mock_sock.close.side_effect = OSError(9, "Bad file descriptor")
+    mock_fp = MagicMock()
+    mock_fp.raw._sock = mock_sock
+    mock_resp = MagicMock()
+    mock_resp.fp = mock_fp
+    # Must not raise
+    OllamaModelProvider._cancel_response_socket(mock_resp)
+    mock_resp.close.assert_called_once()
+
+
+def test_cancel_response_socket_not_called_during_normal_stream():
+    """The socket helper is NOT called during a normal (non-cancelled) stream completion."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Hello"}, "done": False},
+        {"message": {"role": "assistant", "content": " world"}, "done": True},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+    mock_sock = MagicMock()
+    mock_fp = MagicMock()
+    mock_fp.raw._sock = mock_sock
+    mock_resp.fp = mock_fp
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        result = list(provider.stream_response(prompt="Normal stream"))
+
+    assert result == ["Hello", " world"]
+    # Socket should NOT have been shut down during normal completion
+    mock_sock.shutdown.assert_not_called()
+
+
+def test_cancel_response_socket_registered_callback_uses_static_method():
+    """The cancellation callback registered by stream_response delegates to _cancel_response_socket."""
+    chunks = [
+        {"message": {"role": "assistant", "content": "Chunk"}, "done": False},
+    ]
+    mock_resp = MockStreamingHTTPResponse(chunks)
+    mock_sock = MagicMock()
+    mock_fp = MagicMock()
+    mock_fp.raw._sock = mock_sock
+    mock_resp.fp = mock_fp
+
+    token = CancellationToken()
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        provider = OllamaModelProvider()
+        stream = provider.stream_response(prompt="Callback test", cancellation_token=token)
+        next(stream)  # Advance past urlopen; callback is now registered
+        token.cancel()  # Fires the registered _cancel_response_socket callback
+
+    # Socket shutdown and response closure should both have been attempted
+    mock_sock.shutdown.assert_called_once()
     assert mock_resp.closed is True

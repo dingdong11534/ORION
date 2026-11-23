@@ -178,6 +178,34 @@ ApplicationWindow {
             })
         }
 
+        function onResponseInterrupted(partialText, requestId) {
+            if (chatModel.count > 0) {
+                let lastIdx = chatModel.count - 1
+                let lastItem = chatModel.get(lastIdx)
+                if (lastItem.role === "assistant" && (lastItem.status === "pending" || !lastItem.isError)) {
+                    let displayText = partialText && partialText.length > 0 ? partialText : "Request was interrupted. A retry must use a new client_request_id."
+                    chatModel.setProperty(lastIdx, "text", displayText)
+                    chatModel.setProperty(lastIdx, "status", "interrupted")
+                    chatModel.setProperty(lastIdx, "isError", true)
+                    Qt.callLater(function() {
+                        chatList.positionViewAtEnd()
+                    })
+                    return
+                }
+            }
+
+            chatModel.append({
+                role: "assistant",
+                text: partialText && partialText.length > 0 ? partialText : "Request was interrupted. A retry must use a new client_request_id.",
+                status: "interrupted",
+                isError: true
+            })
+
+            Qt.callLater(function() {
+                chatList.positionViewAtEnd()
+            })
+        }
+
         function onErrorOccurred(errorMessage) {
             if (chatModel.count > 0) {
                 let lastIdx = chatModel.count - 1
@@ -711,11 +739,43 @@ ApplicationWindow {
                         }
 
                         Button {
+                            id: stopButton
+                            objectName: "stopButton"
+
+                            visible: root.busy
+                            enabled: root.busy
+                            text: "Stop"
+                            implicitWidth: 76
+                            implicitHeight: 42
+
+                            onClicked: {
+                                if (typeof orion !== "undefined" && orion !== null) {
+                                    orion.stopGeneration()
+                                }
+                            }
+
+                            background: Rectangle {
+                                radius: 12
+                                color: stopButton.down ? "#8A3828" : "#C53929"
+                            }
+
+                            contentItem: Text {
+                                text: stopButton.text
+                                color: "white"
+                                font.pixelSize: 13
+                                font.bold: true
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+
+                        Button {
                             id: sendButton
                             objectName: "sendButton"
 
+                            visible: !root.busy
                             enabled: !root.busy && composer.text.trim().length > 0
-                            text: root.busy ? "Wait..." : "Send"
+                            text: "Send"
                             implicitWidth: 76
                             implicitHeight: 42
 

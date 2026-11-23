@@ -9,6 +9,7 @@ from PySide6.QtCore import Property, QObject, QThreadPool, Signal, Slot
 from orion.application.assistant_service import AssistantService
 from orion.application.contracts import (
     AssistantResponse,
+    AssistantServiceInterruptedError,
     ChatMessage,
     ConversationSummary,
     MessageStatus,
@@ -52,6 +53,7 @@ class OrionBridge(QObject):
 
     responseReady = Signal(str)
     responseChunk = Signal(str, str)
+    responseInterrupted = Signal(str, str)
     errorOccurred = Signal(str)
     busyChanged = Signal(bool)
 
@@ -81,6 +83,8 @@ class OrionBridge(QObject):
         self._is_busy = False
         self._is_shutting_down = False
         self._active_workers: dict[str, Worker] = {}
+        self._current_request_id: str | None = None
+        self._cancelled_request_ids: set[str] = set()
 
     @Property(bool, notify=busyChanged)
     def isBusy(self) -> bool:
@@ -214,6 +218,17 @@ class OrionBridge(QObject):
         """Compatibility alias for sendMessage."""
         self.sendMessage(message)
 
+    @Slot()
+    def stopGeneration(self) -> None:
+        """Request cooperative cancellation of the active response generation."""
+        if self._is_shutting_down:
+            return
+        if not self._current_request_id:
+            return
+        req_id = self._current_request_id
+        self._cancelled_request_ids.add(req_id)
+        self._service.cancel_request(req_id)
+
     @Slot(str)
     def sendMessage(self, message: str) -> None:
         """Validate input and initiate background message processing."""
@@ -232,19 +247,23 @@ class OrionBridge(QObject):
 
         target_cid = self._service.active_conversation_id
         request_id = generate_request_id()
+        self._current_request_id = request_id
 
-        def _task(signals: WorkerSignals) -> tuple[str, str, list[dict[str, Any]], str]:
-            def _emit_chunk(c: str) -> None:
-                signals.chunk.emit(request_id, c)
-
-            accumulated = list(
-                self._service.stream_message(
+        def _task(signals: WorkerSignals) -> tuple[str, ...]:
+            accumulated: list[str] = []
+            try:
+                for chunk in self._service.stream_message(
                     trimmed,
                     client_request_id=request_id,
                     conversation_id=target_cid,
-                    on_chunk=_emit_chunk,
-                )
-            )
+                ):
+                    accumulated.append(chunk)
+                    signals.chunk.emit(request_id, chunk)
+            except AssistantServiceInterruptedError as exc:
+                partial_text = exc.partial_content or "".join(accumulated)
+                convs = [_conv_to_dict(c) for c in self._service.list_conversations()]
+                active_id = self._service.active_conversation_id or ""
+                return ("send_message_interrupted", partial_text, convs, active_id)
 
             full_text = "".join(accumulated)
             convs = [_conv_to_dict(c) for c in self._service.list_conversations()]
@@ -258,6 +277,8 @@ class OrionBridge(QObject):
         if self._is_shutting_down:
             return
         if task_id not in self._active_workers:
+            return
+        if task_id in self._cancelled_request_ids:
             return
         self.responseChunk.emit(chunk, task_id)
 
@@ -293,6 +314,12 @@ class OrionBridge(QObject):
                 if was_active:
                     self.activeConversationChanged.emit("")
                     self.historyLoaded.emit([])
+                return
+            if tag == "send_message_interrupted":
+                _, partial_text, convs, active_id = result
+                self.responseInterrupted.emit(partial_text, task_id)
+                self.conversationsLoaded.emit(convs, active_id)
+                self.activeConversationChanged.emit(active_id)
                 return
             if tag == "send_message_stream_result":
                 _, full_text, convs, active_id = result
@@ -337,10 +364,15 @@ class OrionBridge(QObject):
     def _handle_worker_error(self, task_id: str, error_message: str) -> None:
         if self._is_shutting_down:
             return
+        if task_id in self._cancelled_request_ids:
+            return
         self.errorOccurred.emit(error_message)
 
     @Slot(str)
     def _handle_worker_finished(self, task_id: str) -> None:
+        if self._current_request_id == task_id:
+            self._current_request_id = None
+        self._cancelled_request_ids.discard(task_id)
         self._active_workers.pop(task_id, None)
         if not self._active_workers:
             self._set_busy(False)

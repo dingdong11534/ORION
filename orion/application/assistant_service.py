@@ -1,10 +1,13 @@
 """Assistant service orchestrating conversation workflows, model inference, and persistence."""
 
 import logging
+import threading
 from collections.abc import Callable, Iterator, Sequence
 
 from orion.application.contracts import (
     AssistantResponse,
+    AssistantServiceInterruptedError,
+    CancellationToken,
     ChatMessage,
     ChatRequest,
     ConversationSummary,
@@ -18,6 +21,7 @@ from orion.application.ports import (
     ModelProvider,
     SettingsStore,
 )
+from orion.infrastructure.ollama_model_provider import OllamaCancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,8 @@ class AssistantService:
         self._conversation_store = conversation_store
         self._settings_store = settings_store
         self._active_conversation_id: str | None = None
+        self._active_cancellations: dict[str, CancellationToken] = {}
+        self._cancellations_lock = threading.Lock()
         self._init_active_conversation()
 
     def _init_active_conversation(self) -> None:
@@ -370,6 +376,18 @@ class AssistantService:
             content=response_text,
         )
 
+    def cancel_request(self, client_request_id: str) -> bool:
+        """Cancel an active in-flight request if present.
+
+        Returns True if a matching active request was found and cancellation requested.
+        """
+        with self._cancellations_lock:
+            token = self._active_cancellations.get(client_request_id)
+        if token is not None:
+            token.cancel()
+            return True
+        return False
+
     def stream_message(
         self,
         content_or_request: str | ChatRequest,
@@ -458,13 +476,22 @@ class AssistantService:
             and m.client_request_id != req.client_request_id
         ]
 
-        # D. Stream response chunks without holding open database transactions
+        # Register cancellation token for this active request
+        cancellation_token = CancellationToken()
+        with self._cancellations_lock:
+            self._active_cancellations[req.client_request_id] = cancellation_token
+
         accumulated_chunks: list[str] = []
         try:
+            # D. Stream response chunks without holding open database transactions
+            if cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation cancelled by user.")
+
             if hasattr(self._model_provider, "stream_response"):
                 chunk_iter = self._model_provider.stream_response(
                     prompt=req.content,
                     history=chat_history,
+                    cancellation_token=cancellation_token,
                 )
             else:
                 full_text = self._model_provider.generate_response(
@@ -474,11 +501,44 @@ class AssistantService:
                 chunk_iter = iter([full_text])
 
             for chunk in chunk_iter:
+                if cancellation_token.is_cancelled:
+                    raise OllamaCancelledError("Generation cancelled by user.")
                 accumulated_chunks.append(chunk)
                 if on_chunk is not None:
                     on_chunk(chunk)
                 yield chunk
+
+            if cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation cancelled by user.")
+
+            # E. Successful completion: persist completed assistant response exactly once
+            full_response = "".join(accumulated_chunks)
+            self._conversation_store.complete_request(
+                conversation_id=cid,
+                client_request_id=req.client_request_id,
+                response_content=full_response,
+            )
         except Exception as model_exc:
+            if cancellation_token.is_cancelled or isinstance(model_exc, OllamaCancelledError):
+                partial_text = "".join(accumulated_chunks)
+                try:
+                    self._conversation_store.interrupt_request(
+                        conversation_id=cid,
+                        client_request_id=req.client_request_id,
+                        partial_content=partial_text,
+                        reason="Generation cancelled by user.",
+                    )
+                except Exception as persist_exc:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to persist interrupted request %s: %s",
+                        req.client_request_id,
+                        persist_exc,
+                    )
+                raise AssistantServiceInterruptedError(
+                    f"Request {req.client_request_id} was cancelled by user.",
+                    partial_content=partial_text,
+                ) from model_exc
+
             # Model failure: record failure in persistence
             err_msg = str(model_exc)
             try:
@@ -495,16 +555,6 @@ class AssistantService:
             raise AssistantServiceError(
                 f"Model provider generation failed: {model_exc}"
             ) from model_exc
-
-        # E. Successful completion: persist completed assistant response exactly once
-        full_response = "".join(accumulated_chunks)
-        try:
-            self._conversation_store.complete_request(
-                conversation_id=cid,
-                client_request_id=req.client_request_id,
-                response_content=full_response,
-            )
-        except Exception as complete_exc:
-            raise AssistantServiceError(
-                f"Failed to persist completed response: {complete_exc}"
-            ) from complete_exc
+        finally:
+            with self._cancellations_lock:
+                self._active_cancellations.pop(req.client_request_id, None)

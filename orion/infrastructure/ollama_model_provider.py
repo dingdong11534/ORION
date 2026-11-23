@@ -2,19 +2,24 @@
 
 import json
 import logging
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator, Sequence
 from typing import Any
 
-from orion.application.contracts import ChatMessage
+from orion.application.contracts import CancellationToken, ChatMessage
 
 logger = logging.getLogger(__name__)
 
 
 class OllamaProviderError(Exception):
     """Base exception for all Ollama model provider errors."""
+
+
+class OllamaCancelledError(OllamaProviderError):
+    """Raised when an Ollama request or streaming response is cancelled by the user."""
 
 
 class OllamaConnectionError(OllamaProviderError):
@@ -116,6 +121,45 @@ class OllamaModelProvider:
             f"Network failure communicating with Ollama server at {self.base_url}: {reason}"
         ) from exc
 
+    @staticmethod
+    def _cancel_response_socket(resp: Any) -> None:
+        """Interrupt a blocked urllib HTTP response by shutting down its underlying socket.
+
+        Accesses ``resp.fp.raw._sock`` — a CPython 3.12 ``http.client.HTTPResponse``
+        internal attribute chain.  These attributes are **private implementation details**
+        of CPython's ``http.client`` module and are **not** part of Python's public API.
+        This approach has been verified on CPython 3.12 / Linux only.  Any CPython
+        upgrade may change or remove these internals and must be re-validated.
+
+        Normal response lifecycle:
+            After the ``with resp:`` block exits, ``HTTPResponse._close_conn()`` sets
+            ``self.fp = None``.  The ``getattr`` chain therefore returns ``None``
+            safely and no socket operation is attempted.
+
+        Concurrent closure race:
+            If the socket is closed concurrently (e.g. stream exhausted while
+            cancellation fires), ``sock.shutdown()`` raises ``OSError: [Errno 9]
+            Bad file descriptor``.  This is intentionally caught and silently ignored
+            because the connection is already closed, which is the desired state.
+        """
+        try:
+            sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:  # Already closed / bad file descriptor
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        except Exception:  # noqa: BLE001, S110
+            pass
+        try:
+            resp.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
     def generate_response(
         self,
         prompt: str,
@@ -209,8 +253,12 @@ class OllamaModelProvider:
         self,
         prompt: str,
         history: Sequence[ChatMessage] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> Iterator[str]:
         """Stream response chunks incrementally for the given prompt and conversation history."""
+        if cancellation_token and cancellation_token.is_cancelled:
+            raise OllamaCancelledError("Generation was cancelled before starting.")
+
         messages: list[dict[str, str]] = []
 
         if history:
@@ -257,17 +305,31 @@ class OllamaModelProvider:
         try:
             resp = urllib.request.urlopen(req, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.") from exc
             self._handle_http_error(exc)
         except urllib.error.URLError as exc:
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.") from exc
             self._handle_url_error(exc)
         except TimeoutError as exc:
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.") from exc
             raise OllamaTimeoutError(
                 f"Inference request to Ollama server at {self.base_url} timed out after {self.timeout}s."
             ) from exc
         except OSError as exc:
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.") from exc
             raise OllamaConnectionError(
                 f"System connection error while communicating with Ollama server at {self.base_url}: {exc}"
             ) from exc
+
+        def _interrupt_stream() -> None:
+            OllamaModelProvider._cancel_response_socket(resp)
+
+        if cancellation_token:
+            cancellation_token.register(_interrupt_stream)
 
         has_yielded = False
         has_non_empty = False
@@ -283,6 +345,8 @@ class OllamaModelProvider:
                     line_iter = raw.splitlines(keepends=True)
 
                 for line in line_iter:
+                    if cancellation_token and cancellation_token.is_cancelled:
+                        raise OllamaCancelledError("Generation was cancelled by user.")
                     if not line:
                         continue
                     if isinstance(line, bytes):
@@ -295,6 +359,8 @@ class OllamaModelProvider:
                     try:
                         record = json.loads(line_str)
                     except json.JSONDecodeError as exc:
+                        if cancellation_token and cancellation_token.is_cancelled:
+                            raise OllamaCancelledError("Generation was cancelled by user.") from exc
                         raise OllamaResponseError(
                             f"Malformed JSON chunk received from Ollama server: {exc}"
                         ) from exc
@@ -324,6 +390,9 @@ class OllamaModelProvider:
                         done_received = True
                         break
 
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.")
+
             if not done_received:
                 raise OllamaResponseError(
                     "Ollama stream ended prematurely without 'done: true' record."
@@ -333,15 +402,25 @@ class OllamaModelProvider:
                     f"Ollama model {self.model_name!r} returned an empty streamed response. "
                     "The model may have produced only whitespace or reasoning."
                 )
+        except OllamaCancelledError:
+            raise
         except urllib.error.HTTPError as exc:
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.") from exc
             self._handle_http_error(exc)
         except urllib.error.URLError as exc:
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.") from exc
             self._handle_url_error(exc)
         except TimeoutError as exc:
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.") from exc
             raise OllamaTimeoutError(
                 f"Inference request to Ollama server at {self.base_url} timed out after {self.timeout}s."
             ) from exc
         except OSError as exc:
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Generation was cancelled by user.") from exc
             raise OllamaConnectionError(
                 f"Connection error while streaming from Ollama server at {self.base_url}: {exc}"
             ) from exc

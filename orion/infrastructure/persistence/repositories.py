@@ -180,6 +180,19 @@ def _evt_response_failed(msg: MessageModel) -> ActivityEventModel:
     )
 
 
+def _evt_response_interrupted(msg: MessageModel) -> ActivityEventModel:
+    return ActivityEventModel(
+        id=generate_event_id(),
+        event_type="assistant.response.interrupted",
+        aggregate_type="message",
+        aggregate_id=msg.id,
+        payload_json={
+            "conversation_id": msg.conversation_id,
+            "sequence_number": msg.sequence_number,
+        },
+    )
+
+
 def _evt_settings_updated(key: str) -> ActivityEventModel:
     return ActivityEventModel(
         id=generate_event_id(),
@@ -653,6 +666,56 @@ class SqliteConversationStore:
                     .values(updated_at=now)
                 )
                 session.add(_evt_response_failed(asst))
+                session.commit()
+                session.refresh(asst)
+                return _msg_to_contract(asst)
+
+        return _with_busy_retry(_run)
+
+    def interrupt_request(
+        self,
+        conversation_id: str,
+        client_request_id: str,
+        partial_content: str | None = None,
+        reason: str | None = None,
+    ) -> PersistedMessage:
+        """Mark the assistant message interrupted."""
+        cleaned_partial = (
+            partial_content.strip() if partial_content and partial_content.strip() else None
+        )
+        cleaned_reason = (
+            reason.strip() if reason and reason.strip() else "Generation cancelled by user."
+        )
+
+        def _run() -> PersistedMessage:
+            with self._factory() as session:
+                asst = self._get_assistant_message(session, conversation_id, client_request_id)
+                if asst is None:
+                    raise RequestNotFoundError(
+                        f"Assistant message for request {client_request_id!r} not found."
+                    )
+                if asst.status == "interrupted":
+                    # Idempotency: same reason and partial content -> return existing
+                    if asst.error_message == cleaned_reason and asst.content == cleaned_partial:
+                        return _msg_to_contract(asst)
+                    raise InvalidStateTransitionError(
+                        "Assistant message already interrupted with different reason or content."
+                    )
+                if asst.status != "pending":
+                    raise InvalidStateTransitionError(
+                        f"Cannot interrupt a message in state {asst.status!r}."
+                    )
+                now = utc_now()
+                asst.status = "interrupted"
+                asst.error_message = cleaned_reason
+                asst.content = cleaned_partial
+                asst.updated_at = now
+                session.execute(
+                    update(ConversationModel)
+                    .where(ConversationModel.id == conversation_id)
+                    .values(updated_at=now)
+                )
+                session.add(_evt_response_interrupted(asst))
                 session.commit()
                 session.refresh(asst)
                 return _msg_to_contract(asst)

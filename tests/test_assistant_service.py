@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from alembic import command
 from orion.application.assistant_service import AssistantService, AssistantServiceError
 from orion.application.contracts import (
+    AssistantServiceInterruptedError,
     ChatMessage,
     MessageStatus,
     generate_request_id,
@@ -621,7 +622,7 @@ class MockStreamingProvider:
         self.crash_after = crash_after
         self.calls: list[dict] = []
 
-    def stream_response(self, prompt: str, history=None):
+    def stream_response(self, prompt: str, history=None, cancellation_token=None):
         self.calls.append({"prompt": prompt, "history": history})
         for i, chunk in enumerate(self.chunks):
             if self.crash_after is not None and i >= self.crash_after:
@@ -761,3 +762,197 @@ def test_stream_message_history_remains_correct_across_turns(service_env):
     assert turn2_history[0].content == "Question turn 1"
     assert turn2_history[1].role == "assistant"
     assert turn2_history[1].content == "Answer turn 1"
+
+
+# ---------------------------------------------------------------------------
+# Cooperative Cancellation & Interrupted State Tests (Milestone 3.5)
+# ---------------------------------------------------------------------------
+
+
+class CancellableMockStreamingProvider:
+    """Mock streaming provider that pauses or cooperates with cancellation."""
+
+    def __init__(self, chunks: list[str]) -> None:
+        self.chunks = chunks
+        self.calls: list[dict] = []
+
+    def stream_response(self, prompt: str, history=None, cancellation_token=None):
+        self.calls.append({"prompt": prompt, "history": list(history or [])})
+        for c in self.chunks:
+            if cancellation_token and cancellation_token.is_cancelled:
+                from orion.infrastructure.ollama_model_provider import OllamaCancelledError
+
+                raise OllamaCancelledError("Simulated provider cancelled.")
+            yield c
+
+    def generate_response(self, prompt: str, history=None) -> str:
+        return "".join(self.chunks)
+
+
+def test_stream_message_cancellation_persists_interrupted_status(service_env):
+    """Cancelling an active stream transitions assistant message to interrupted and records partial content."""
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    provider = CancellableMockStreamingProvider(["ChunkA", "ChunkB", "ChunkC", "ChunkD"])
+
+    service = AssistantService(
+        model_provider=provider,
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
+
+    req_id = generate_request_id()
+    stream = service.stream_message("Cancellation test prompt", client_request_id=req_id)
+
+    received = []
+    # Consume 2 chunks
+    received.append(next(stream))
+    received.append(next(stream))
+    assert received == ["ChunkA", "ChunkB"]
+
+    # Cancel the request via service
+    cancelled = service.cancel_request(req_id)
+    assert cancelled is True
+
+    # Next iteration must raise AssistantServiceInterruptedError
+    with pytest.raises(AssistantServiceInterruptedError) as exc_info:
+        next(stream)
+
+    assert "cancelled by user" in str(exc_info.value)
+    assert exc_info.value.partial_content == "ChunkAChunkB"
+
+    # Verify SQLite persistence state
+    cid = service.active_conversation_id
+    record = conv_store.get_request(cid, req_id)
+    assert record.user_message.status == MessageStatus.COMPLETED
+    assert record.user_message.content == "Cancellation test prompt"
+    assert record.assistant_message.status == MessageStatus.INTERRUPTED
+    assert record.assistant_message.content == "ChunkAChunkB"
+    assert record.assistant_message.error_message == "Generation cancelled by user."
+
+    # Active cancellations cleaned up
+    assert req_id not in service._active_cancellations
+
+
+def test_cancel_request_idempotency_and_unknown_id(service_env):
+    """cancel_request returns False for unknown request ID, and multiple calls are safe."""
+    service = service_env["service"]
+    assert service.cancel_request("non_existent_req_id") is False
+
+
+def test_interrupted_request_subsequent_duplicate_rejected(service_env):
+    """Submitting an identical client_request_id that was previously interrupted returns interrupted response."""
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    provider = CancellableMockStreamingProvider(["Part1", "Part2"])
+
+    service = AssistantService(
+        model_provider=provider,
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
+
+    req_id = generate_request_id()
+    stream = service.stream_message("Prompt to interrupt", client_request_id=req_id)
+    next(stream)
+    service.cancel_request(req_id)
+
+    with pytest.raises(AssistantServiceInterruptedError):
+        next(stream)
+
+    # Calling send_message with same request ID returns INTERRUPTED status
+    asst_resp = service.send_message(
+        "Prompt to interrupt",
+        client_request_id=req_id,
+        conversation_id=service.active_conversation_id,
+    )
+    assert asst_resp.status == MessageStatus.INTERRUPTED
+    assert asst_resp.is_new is False
+
+    # Calling stream_message with same request ID raises AssistantServiceError
+    with pytest.raises(AssistantServiceError) as exc_info:
+        list(service.stream_message("Prompt to interrupt", client_request_id=req_id))
+    assert "was interrupted" in str(exc_info.value)
+
+
+def test_subsequent_turn_excludes_interrupted_turn_from_context(service_env):
+    """Subsequent successful turns do not include interrupted messages in model history."""
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    provider = CancellableMockStreamingProvider(["Good Turn 1"])
+
+    service = AssistantService(
+        model_provider=provider,
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
+
+    # Turn 1: Completes cleanly
+    list(service.stream_message("Turn 1 Question"))
+
+    # Turn 2: Gets interrupted
+    provider.chunks = ["Interrupted Part 1", "Interrupted Part 2"]
+    req2_id = generate_request_id()
+    stream2 = service.stream_message("Turn 2 Question", client_request_id=req2_id)
+    next(stream2)
+    service.cancel_request(req2_id)
+    with pytest.raises(AssistantServiceInterruptedError):
+        next(stream2)
+
+    # Turn 3: Successful next turn
+    provider.chunks = ["Good Turn 3"]
+    list(service.stream_message("Turn 3 Question"))
+
+    # Model history for Turn 3 should only contain Turn 1, excluding Turn 2
+    turn3_call = provider.calls[-1]
+    turn3_history = turn3_call["history"]
+    assert len(turn3_history) == 2
+    assert turn3_history[0].role == "user"
+    assert turn3_history[0].content == "Turn 1 Question"
+    assert turn3_history[1].role == "assistant"
+    assert turn3_history[1].content == "Good Turn 1"
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3.5.2 — TypeError propagation regression test (Part A)
+# ---------------------------------------------------------------------------
+
+
+def test_internal_type_error_inside_stream_response_propagates(service_env):
+    """A TypeError raised *inside* stream_response propagates; it is NOT swallowed or retried.
+
+    This guards against the former broad ``except TypeError:`` fallback that
+    would silently call stream_response a second time without cancellation_token.
+    """
+    call_count = [0]
+
+    class BuggyStreamProvider:
+        """Provider whose stream_response raises TypeError due to an internal bug."""
+
+        def stream_response(
+            self,
+            prompt: str,
+            history=None,
+            cancellation_token=None,
+        ):
+            call_count[0] += 1
+            raise TypeError("Internal bug: bad argument type")
+
+        def generate_response(self, prompt: str, history=None) -> str:  # pragma: no cover
+            raise AssertionError(
+                "generate_response must NOT be called — stream_response is present"
+            )
+
+    conv_store = service_env["conv_store"]
+    settings_store = service_env["settings_store"]
+    service = AssistantService(
+        model_provider=BuggyStreamProvider(),
+        conversation_store=conv_store,
+        settings_store=settings_store,
+    )
+
+    with pytest.raises((AssistantServiceError, TypeError)):
+        list(service.stream_message("trigger internal bug"))
+
+    # Provider was called exactly once — no silent retry with fewer kwargs
+    assert call_count[0] == 1

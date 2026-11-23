@@ -1,4 +1,6 @@
+import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -79,6 +81,49 @@ class ChatRequest(BaseModel):
         if not trimmed:
             raise ValueError("client_request_id cannot be blank or contain only whitespace.")
         return trimmed
+
+
+class CancellationToken:
+    """Thread-safe cooperative cancellation token."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._callbacks: list[Callable[[], None]] = []
+        self._lock = threading.Lock()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._event.is_set():
+                return
+            self._event.set()
+            callbacks = list(self._callbacks)
+        for cb in callbacks:
+            try:
+                cb()
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+    def register(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            if self._event.is_set():
+                try:
+                    callback()
+                except Exception:  # noqa: BLE001, S110
+                    pass
+                return
+            self._callbacks.append(callback)
+
+
+class AssistantServiceInterruptedError(Exception):
+    """Raised when an active assistant response is cancelled by the user."""
+
+    def __init__(self, message: str, partial_content: str | None = None) -> None:
+        super().__init__(message)
+        self.partial_content = partial_content
 
 
 # ---------------------------------------------------------------------------
