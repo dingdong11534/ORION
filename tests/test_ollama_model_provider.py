@@ -134,7 +134,7 @@ def test_current_prompt_included_exactly_once():
 
 
 def test_correct_non_streaming_payload():
-    """stream is set to False in payload."""
+    """stream is set to False and think is set to False by default in payload."""
     resp_payload = {"message": {"role": "assistant", "content": "Non-streamed"}}
     mock_resp = MockHTTPResponse(json.dumps(resp_payload).encode("utf-8"))
 
@@ -145,7 +145,54 @@ def test_correct_non_streaming_payload():
     req = mock_urlopen.call_args[0][0]
     payload = json.loads(req.data.decode("utf-8"))
     assert payload["stream"] is False
+    assert payload["think"] is False
     assert payload["keep_alive"] == "30s"
+
+
+def test_default_think_parameter_is_false():
+    """Default provider configuration sends think=False."""
+    resp_payload = {"message": {"role": "assistant", "content": "Default think"}}
+    mock_resp = MockHTTPResponse(json.dumps(resp_payload).encode("utf-8"))
+
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+        provider = OllamaModelProvider()
+        assert provider.think is False
+        provider.generate_response(prompt="Test think default")
+
+    req = mock_urlopen.call_args[0][0]
+    payload = json.loads(req.data.decode("utf-8"))
+    assert payload["think"] is False
+
+
+def test_explicit_think_parameter_true():
+    """Explicit think=True sends think: true in the request payload."""
+    resp_payload = {"message": {"role": "assistant", "content": "Thinking response"}}
+    mock_resp = MockHTTPResponse(json.dumps(resp_payload).encode("utf-8"))
+
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+        provider = OllamaModelProvider(think=True)
+        assert provider.think is True
+        provider.generate_response(prompt="Think enabled")
+
+    req = mock_urlopen.call_args[0][0]
+    payload = json.loads(req.data.decode("utf-8"))
+    assert payload["think"] is True
+
+
+def test_qwen25_provider_remains_compatible():
+    """Qwen2.5 model provider continues to function with default think=False."""
+    resp_payload = {"message": {"role": "assistant", "content": "Qwen2.5 reply"}}
+    mock_resp = MockHTTPResponse(json.dumps(resp_payload).encode("utf-8"))
+
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+        provider = OllamaModelProvider(model_name="qwen2.5:1.5b")
+        reply = provider.generate_response(prompt="2 + 2")
+
+    assert reply == "Qwen2.5 reply"
+    req = mock_urlopen.call_args[0][0]
+    payload = json.loads(req.data.decode("utf-8"))
+    assert payload["model"] == "qwen2.5:1.5b"
+    assert payload["think"] is False
 
 
 def test_correct_context_and_prediction_limits():

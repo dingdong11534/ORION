@@ -55,12 +55,14 @@ class OllamaModelProvider:
         timeout: float = 300.0,
         num_ctx: int = 2048,
         num_predict: int = 256,
+        think: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name.strip()
         self.timeout = timeout
         self.num_ctx = num_ctx
         self.num_predict = num_predict
+        self.think = think
 
     def generate_response(
         self,
@@ -90,6 +92,7 @@ class OllamaModelProvider:
             "model": self.model_name,
             "messages": messages,
             "stream": False,
+            "think": self.think,
             "keep_alive": "30s",
             "options": {
                 "num_ctx": self.num_ctx,

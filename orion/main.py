@@ -97,7 +97,9 @@ def create_model_provider() -> ModelProvider:
     if provider_type == "ollama":
         base_url = os.environ.get("ORION_OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
         model_name = os.environ.get("ORION_OLLAMA_MODEL", "qwen2.5:1.5b").strip()
-        return OllamaModelProvider(base_url=base_url, model_name=model_name)
+        think_env = os.environ.get("ORION_OLLAMA_THINK", "false").strip().lower()
+        think = think_env in ("true", "1", "yes")
+        return OllamaModelProvider(base_url=base_url, model_name=model_name, think=think)
     elif provider_type == "fake":
         return FakeModelProvider(simulated_delay=0.15)
     else:

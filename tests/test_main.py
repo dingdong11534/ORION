@@ -95,6 +95,19 @@ def test_create_model_provider_defaults_to_ollama(monkeypatch):
     assert isinstance(provider, OllamaModelProvider)
     assert provider.base_url == "http://127.0.0.1:11434"
     assert provider.model_name == "qwen2.5:1.5b"
+    assert provider.think is False
+
+
+def test_create_model_provider_custom_think_env(monkeypatch):
+    """ORION_OLLAMA_THINK environment variable controls the think parameter."""
+    monkeypatch.setenv("ORION_MODEL_PROVIDER", "ollama")
+    monkeypatch.setenv("ORION_OLLAMA_THINK", "true")
+
+    from orion.infrastructure.ollama_model_provider import OllamaModelProvider
+
+    provider = create_model_provider()
+    assert isinstance(provider, OllamaModelProvider)
+    assert provider.think is True
 
 
 def test_create_model_provider_fake(monkeypatch):
