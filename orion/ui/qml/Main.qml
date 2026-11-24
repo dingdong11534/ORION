@@ -39,6 +39,32 @@ ApplicationWindow {
 
     property int approvalRemainingSeconds: 60
 
+    // ---- Execution display state ----
+    property string executionId: ""
+    property string executionCommand: ""
+    property var    executionArgs: []
+    property string executionCwd: ""
+    property string executionStatus: ""   // "running" | "completed" | "failed" | "cancelled" | "timed_out"
+    property string executionStdout: ""
+    property string executionStderr: ""
+    property int    executionExitCode: -1
+    property double executionDurationMs: 0
+    property double executionElapsedMs: 0
+    property bool   executionTruncated: false
+    property string executionError: ""
+    property bool   executionPanelVisible: false
+    readonly property int maxExecutionDisplayStreamChars: 131072
+
+    Timer {
+        id: executionElapsedTimer
+        interval: 100
+        repeat: true
+        running: root.executionStatus === "running"
+        onTriggered: {
+            root.executionElapsedMs += 100
+        }
+    }
+
     function getActiveTitle() {
         if (!root.activeConversationId)
             return "New Chat"
@@ -169,6 +195,52 @@ ApplicationWindow {
                     break
                 }
             }
+        }
+
+        function onExecutionStarted(executionId, command, args, cwd) {
+            root.executionId = executionId
+            root.executionCommand = command
+            root.executionArgs = args
+            root.executionCwd = cwd
+            root.executionStatus = "running"
+            root.executionStdout = ""
+            root.executionStderr = ""
+            root.executionExitCode = -1
+            root.executionDurationMs = 0
+            root.executionElapsedMs = 0
+            root.executionTruncated = false
+            root.executionError = ""
+            root.executionPanelVisible = true
+        }
+
+        function onExecutionOutputChunk(executionId, stream, text) {
+            if (executionId === "" || executionId !== root.executionId) return
+            if (stream === "stdout") {
+                const rem = root.maxExecutionDisplayStreamChars - root.executionStdout.length
+                if (rem > 0) {
+                    root.executionStdout = root.executionStdout + (text.length > rem ? text.slice(0, rem) : text)
+                }
+                if (text.length > rem) {
+                    root.executionTruncated = true
+                }
+            } else {
+                const rem = root.maxExecutionDisplayStreamChars - root.executionStderr.length
+                if (rem > 0) {
+                    root.executionStderr = root.executionStderr + (text.length > rem ? text.slice(0, rem) : text)
+                }
+                if (text.length > rem) {
+                    root.executionTruncated = true
+                }
+            }
+        }
+
+        function onExecutionFinished(executionId, status, exitCode, durationMs, truncated, errorMessage) {
+            if (executionId !== root.executionId) return
+            root.executionStatus = status
+            root.executionExitCode = exitCode
+            root.executionDurationMs = durationMs
+            root.executionTruncated = truncated
+            root.executionError = errorMessage
         }
 
         function onResponseChunk(chunk, requestId) {
@@ -1190,6 +1262,321 @@ ApplicationWindow {
                             font.bold: true
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // Execution Display Drawer
+    // ==========================================
+    Rectangle {
+        id: executionDrawer
+        objectName: "executionDrawer"
+        visible: root.executionPanelVisible
+        anchors {
+            left: parent.left
+            right: parent.right
+            bottom: parent.bottom
+            margins: 18
+        }
+        height: Math.min(360, parent.height * 0.45)
+        z: 500
+
+        radius: 16
+        color: "#FCFBF8"
+        border.width: 1
+        border.color: "#D6D3CA"
+
+        Column {
+            anchors.fill: parent
+            anchors.margins: 14
+            spacing: 8
+
+            // Header row
+            Row {
+                width: parent.width
+                spacing: 8
+
+                Text {
+                    text: "Subprocess Execution"
+                    font.pixelSize: 13
+                    font.bold: true
+                    color: "#303A32"
+                    textFormat: Text.PlainText
+                    verticalAlignment: Text.AlignVCenter
+                    height: 28
+                }
+
+                // Status badge
+                Rectangle {
+                    width: statusBadge.implicitWidth + 12
+                    height: 22
+                    radius: 5
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: {
+                        const s = root.executionStatus
+                        if (s === "running") return "#F6EEDD"
+                        if (s === "completed") return "#EBF3EE"
+                        if (s === "cancelled") return "#F6F0E0"
+                        if (s === "timed_out") return "#FEF3C7"
+                        return "#FBEAE8"
+                    }
+                    border.color: {
+                        const s = root.executionStatus
+                        if (s === "running") return "#C9A74E"
+                        if (s === "completed") return "#526D5B"
+                        if (s === "cancelled") return "#A08040"
+                        if (s === "timed_out") return "#D97706"
+                        return "#D9534F"
+                    }
+                    border.width: 1
+
+                    Text {
+                        id: statusBadge
+                        anchors.centerIn: parent
+                        text: root.executionStatus.toUpperCase()
+                        font.pixelSize: 10
+                        font.bold: true
+                        color: {
+                            const s = root.executionStatus
+                            if (s === "running") return "#C9A74E"
+                            if (s === "completed") return "#526D5B"
+                            if (s === "cancelled") return "#A08040"
+                            if (s === "timed_out") return "#D97706"
+                            return "#D9534F"
+                        }
+                        textFormat: Text.PlainText
+                    }
+                }
+
+                // Truncation badge
+                Rectangle {
+                    visible: root.executionTruncated
+                    width: truncLabel.implicitWidth + 12
+                    height: 22
+                    radius: 5
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: "#FBEAE8"
+                    border.color: "#D9534F"
+                    border.width: 1
+                    Text {
+                        id: truncLabel
+                        anchors.centerIn: parent
+                        text: "TRUNCATED"
+                        font.pixelSize: 10
+                        font.bold: true
+                        color: "#D9534F"
+                        textFormat: Text.PlainText
+                    }
+                }
+
+                Item { width: parent.width - 220; height: 1 }
+
+                // Duration / live elapsed label
+                Text {
+                    visible: root.executionStatus === "running" || root.executionDurationMs > 0
+                    text: root.executionStatus === "running"
+                        ? (root.executionElapsedMs / 1000).toFixed(1) + "s"
+                        : (root.executionDurationMs / 1000).toFixed(2) + "s"
+                    font.pixelSize: 11
+                    color: "#889080"
+                    textFormat: Text.PlainText
+                    verticalAlignment: Text.AlignVCenter
+                    height: 28
+                }
+
+                // Cancel button (only shown while running)
+                Rectangle {
+                    id: stopExecutionButton
+                    objectName: "stopExecutionButton"
+                    visible: root.executionStatus === "running"
+                    enabled: root.executionStatus === "running" && root.executionId !== ""
+                    width: cancelExecBtn.implicitWidth + 20
+                    height: 26
+                    radius: 8
+                    color: "#FBEAE8"
+                    border.color: "#D9534F"
+                    border.width: 1
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        id: cancelExecBtn
+                        anchors.centerIn: parent
+                        text: "Stop"
+                        font.pixelSize: 11
+                        font.bold: true
+                        color: "#D9534F"
+                        textFormat: Text.PlainText
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: stopExecutionButton.enabled
+                        onClicked: {
+                            if (typeof orion !== "undefined" && orion !== null && root.executionId !== "") {
+                                orion.cancelExecution(root.executionId)
+                            }
+                        }
+                    }
+                }
+
+                // Dismiss button
+                Rectangle {
+                    id: dismissExecutionButton
+                    objectName: "dismissExecutionButton"
+                    visible: root.executionStatus !== "running"
+                    width: dismissBtn.implicitWidth + 20
+                    height: 26
+                    radius: 8
+                    color: "#EBE9E3"
+                    border.color: "#CCC9C0"
+                    border.width: 1
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        id: dismissBtn
+                        anchors.centerIn: parent
+                        text: "Dismiss"
+                        font.pixelSize: 11
+                        color: "#666860"
+                        textFormat: Text.PlainText
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            root.executionPanelVisible = false
+                            root.executionId = ""
+                        }
+                    }
+                }
+            }
+
+            // Command line display
+            Text {
+                width: parent.width
+                text: root.executionCommand + (root.executionArgs.length > 0 ? " " + root.executionArgs.join(" ") : "")
+                font.pixelSize: 11
+                font.family: "monospace"
+                color: "#555750"
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+            }
+
+            // CWD
+            Text {
+                width: parent.width
+                text: "cwd: " + root.executionCwd
+                font.pixelSize: 10
+                color: "#888B80"
+                textFormat: Text.PlainText
+                elide: Text.ElideLeft
+            }
+
+            // Error message
+            Text {
+                visible: root.executionError !== "" && root.executionStatus !== "running"
+                width: parent.width
+                text: root.executionError
+                font.pixelSize: 11
+                color: "#D9534F"
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+            }
+
+            // stdout / stderr split
+            Row {
+                width: parent.width
+                height: executionDrawer.height - 130
+                spacing: 8
+
+                // stdout
+                Rectangle {
+                    width: (parent.width - 8) / 2
+                    height: parent.height
+                    radius: 8
+                    color: "#F4F2EB"
+                    border.width: 1
+                    border.color: "#E0DDD5"
+
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        spacing: 4
+
+                        Text {
+                            text: "stdout"
+                            font.pixelSize: 10
+                            font.bold: true
+                            color: "#7A7E70"
+                            textFormat: Text.PlainText
+                        }
+
+                        ScrollView {
+                            width: parent.width
+                            height: parent.height - 20
+                            clip: true
+                            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                            ScrollBar.horizontal.policy: ScrollBar.AsNeeded
+
+                            TextArea {
+                                objectName: "stdoutDisplay"
+                                text: root.executionStdout
+                                readOnly: true
+                                wrapMode: TextArea.NoWrap
+                                font.pixelSize: 11
+                                font.family: "monospace"
+                                color: "#303A32"
+                                background: null
+                                textFormat: TextEdit.PlainText
+                            }
+                        }
+                    }
+                }
+
+                // stderr
+                Rectangle {
+                    width: (parent.width - 8) / 2
+                    height: parent.height
+                    radius: 8
+                    color: root.executionStderr !== "" ? "#FDF8F4" : "#F4F2EB"
+                    border.width: 1
+                    border.color: root.executionStderr !== "" ? "#F0D8C8" : "#E0DDD5"
+
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        spacing: 4
+
+                        Text {
+                            text: "stderr"
+                            font.pixelSize: 10
+                            font.bold: true
+                            color: root.executionStderr !== "" ? "#C07050" : "#7A7E70"
+                            textFormat: Text.PlainText
+                        }
+
+                        ScrollView {
+                            width: parent.width
+                            height: parent.height - 20
+                            clip: true
+                            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                            ScrollBar.horizontal.policy: ScrollBar.AsNeeded
+
+                            TextArea {
+                                objectName: "stderrDisplay"
+                                text: root.executionStderr
+                                readOnly: true
+                                wrapMode: TextArea.NoWrap
+                                font.pixelSize: 11
+                                font.family: "monospace"
+                                color: root.executionStderr !== "" ? "#8B3A20" : "#303A32"
+                                background: null
+                                textFormat: TextEdit.PlainText
+                            }
                         }
                     }
                 }

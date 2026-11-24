@@ -197,12 +197,15 @@ def main() -> int:
         )
         app.aboutToQuit.connect(lifecycle.shutdown)
 
-        # 8b. Resolve workspace root and bootstrap tool registry
+        # 8b. Resolve workspace root and bootstrap tool registry & execution manager
+        from orion.infrastructure.tools.execution_manager import ExecutionManager
         from orion.infrastructure.tools.path_resolver import get_configured_workspace_root
         from orion.infrastructure.tools.workspace_tools import build_workspace_tool_system
 
         workspace_root = get_configured_workspace_root()
         tool_registry, _tool_router, _ = build_workspace_tool_system(workspace_root)
+        execution_manager = ExecutionManager(workspace_root=workspace_root)
+        bridge.set_execution_manager(execution_manager)
         logger.info(
             "Sealed tool registry with %d tools for workspace '%s'",
             len(tool_registry),

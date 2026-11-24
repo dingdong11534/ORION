@@ -33,6 +33,10 @@ class SubprocessExecutor(ToolExecutorPort):
     def execution_manager(self) -> ExecutionManager:
         return self._manager
 
+    def cancel(self, execution_id: str) -> bool:
+        """Cancel the active execution matching execution_id. Delegates to ExecutionManager."""
+        return self._manager.cancel(execution_id)
+
     def execute(self, tool: ToolDefinition, invocation: ToolInvocation) -> ToolResult:
         """Execute an authorized subprocess tool invocation."""
         if tool.execution_type != ExecutionType.SUBPROCESS:

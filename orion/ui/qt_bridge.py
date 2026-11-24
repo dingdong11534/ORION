@@ -20,6 +20,7 @@ from orion.infrastructure.workers import Worker, WorkerSignals
 
 if TYPE_CHECKING:
     from orion.application.tools.approvals import ApprovalBroker
+    from orion.infrastructure.tools.execution_manager import ExecutionManager
 
 logger = logging.getLogger(__name__)
 
@@ -70,18 +71,31 @@ class OrionBridge(QObject):
     approvalResolved = Signal(str, str)
     approvalCancelled = Signal(str)
 
+    # Execution lifecycle signals
+    executionStarted = Signal(str, str, list, str)  # (execution_id, command, args, cwd)
+    executionOutputChunk = Signal(str, str, str)  # (execution_id, stream, text)
+    executionFinished = Signal(
+        str, str, int, float, bool, str
+    )  # (execution_id, status, exit_code, duration_ms, truncated, error_message)
+
     def __init__(
         self,
         assistant_service: AssistantService,
         thread_pool: QThreadPool | None = None,
         parent: QObject | None = None,
         approval_broker: "ApprovalBroker | None" = None,
+        execution_manager: "ExecutionManager | None" = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
         self._approval_broker = approval_broker
         if self._approval_broker is not None:
             self._approval_broker.set_request_listener(self._handle_approval_requested)
+
+        self._execution_manager: ExecutionManager | None = execution_manager
+        if self._execution_manager is not None:
+            self._execution_manager.set_output_listener(self._on_execution_output_chunk)
+            self._execution_manager.set_lifecycle_listener(self._on_execution_lifecycle)
 
         if thread_pool is not None:
             self._thread_pool = thread_pool
@@ -275,6 +289,71 @@ class OrionBridge(QObject):
         elif isinstance(request_data, dict):
             self.approvalRequested.emit(request_data)
 
+    # ------------------------------------------------------------------
+    # Execution lifecycle and output listeners (called from worker threads)
+    # ------------------------------------------------------------------
+
+    def _on_execution_output_chunk(self, execution_id: str, stream: str, text: str) -> None:
+        """Forward a live output chunk from the subprocess worker thread to QML.
+
+        Called from the subprocess drainer thread — must use a queued signal
+        invocation to hop safely onto the Qt main thread.
+        """
+        if self._is_shutting_down:
+            return
+        try:
+            self.executionOutputChunk.emit(execution_id, stream, text)
+        except RuntimeError:
+            # QObject already deleted (e.g. during rapid shutdown)
+            pass
+
+    def _on_execution_lifecycle(
+        self, execution_id: str, event: str, payload: dict[str, Any]
+    ) -> None:
+        """Handle execution lifecycle events from the worker thread.
+
+        ``event`` is one of: 'started', 'completed', 'failed', 'cancelled', 'timed_out'.
+        """
+        if self._is_shutting_down:
+            return
+        try:
+            if event == "started":
+                self.executionStarted.emit(
+                    execution_id,
+                    payload.get("command", ""),
+                    payload.get("args", []),
+                    payload.get("cwd", ""),
+                )
+            else:
+                self.executionFinished.emit(
+                    execution_id,
+                    event,
+                    int(payload.get("exit_code") or -1),
+                    float(payload.get("duration_ms") or 0.0),
+                    bool(payload.get("truncated", False)),
+                    str(payload.get("error_message") or ""),
+                )
+        except RuntimeError:
+            pass
+
+    @Slot(str)
+    def cancelExecution(self, execution_id: str) -> None:
+        """Cancel the active subprocess execution identified by execution_id."""
+        if self._is_shutting_down:
+            return
+        if self._execution_manager is None:
+            logger.warning("cancelExecution called but no ExecutionManager is configured.")
+            return
+        cancelled = self._execution_manager.cancel(execution_id)
+        if not cancelled:
+            logger.debug("cancelExecution: no active execution found for id %s", execution_id)
+
+    def set_execution_manager(self, manager: "ExecutionManager") -> None:
+        """Attach an ExecutionManager and wire output/lifecycle listeners."""
+        self._execution_manager = manager
+        manager.set_output_listener(self._on_execution_output_chunk)
+        manager.set_lifecycle_listener(self._on_execution_lifecycle)
+
     @Slot(str)
     def sendMessage(self, message: str) -> None:
         """Validate input and initiate background message processing."""
@@ -449,6 +528,13 @@ class OrionBridge(QObject):
                 cancelled_ids = self._approval_broker.cancel_all()
                 for aid in cancelled_ids:
                     self.approvalCancelled.emit(aid)
+
+            # Shut down the execution manager (cancels active subprocess)
+            if self._execution_manager is not None:
+                try:
+                    self._execution_manager.shutdown(wait=False)
+                except Exception:  # noqa: BLE001
+                    logger.debug("ExecutionManager shutdown error during bridge shutdown")
 
         drained = self._thread_pool.waitForDone(timeout_ms)
         if not drained:

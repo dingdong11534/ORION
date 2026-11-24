@@ -5,6 +5,7 @@ sanitized environments, bounded concurrency, and strict wall-clock timeouts with
 process-group termination.
 """
 
+import codecs
 import concurrent.futures
 import logging
 import os
@@ -162,6 +163,9 @@ SENSITIVE_ENV_SUBSTRINGS: tuple[str, ...] = (
 
 CHAINING_CHARACTERS: tuple[str, ...] = (";", "&&", "||", "|", "`", "$(")
 
+OutputChunkListener = Callable[[str, str, str], None]
+LifecycleListener = Callable[[str, str, dict[str, Any]], None]
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -209,6 +213,7 @@ class ExecutionRequest(BaseModel):
     timeout_seconds: float = Field(default=DEFAULT_TIMEOUT_SECONDS, gt=0.0, le=MAX_TIMEOUT_SECONDS)
     conversation_id: str = ""
     client_request_id: str = ""
+    output_listener: Any = None
 
 
 class ExecutionOutput(BaseModel):
@@ -227,6 +232,8 @@ class ExecutionOutput(BaseModel):
     started_at: datetime
     completed_at: datetime
     error_message: str | None = None
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -708,8 +715,101 @@ def validate_command_arguments(
 
 
 # ---------------------------------------------------------------------------
-# Stream Drain Helper
+# Output Batching & Stream Drain Helper
 # ---------------------------------------------------------------------------
+
+
+class OutputBatcher:
+    """Coalesces streaming stdout and stderr chunks to avoid flooding UI event loops.
+
+    Buffers chunks per stream and emits them:
+    - When accumulated characters exceed max_batch_chars (default 1024), OR
+    - Every flush_interval_seconds (default 50ms = 0.05s) via background timer, AND
+    - During final close() to guarantee zero dropped output.
+    """
+
+    def __init__(
+        self,
+        execution_id: str,
+        emit_fn: Callable[[str, str, str], None],
+        flush_interval_seconds: float = 0.05,
+        max_batch_chars: int = 1024,
+        max_pending_chars: int = MAX_OUTPUT_BYTES,
+    ) -> None:
+        self._execution_id = execution_id
+        self._emit_fn = emit_fn
+        self._flush_interval = flush_interval_seconds
+        self._max_batch_chars = max_batch_chars
+        self._max_pending_chars = max_pending_chars
+
+        self._lock = threading.Lock()
+        self._buffers: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        self._buffer_lens: dict[str, int] = {"stdout": 0, "stderr": 0}
+        self._stopped = threading.Event()
+        self._flusher_thread = threading.Thread(
+            target=self._flusher_loop,
+            name=f"output-batcher-{execution_id[:8]}",
+            daemon=True,
+        )
+        self._flusher_thread.start()
+
+    def push(self, stream: str, text: str) -> None:
+        """Push decoded text for a stream ('stdout' or 'stderr') within bounded pending budget."""
+        if not text:
+            return
+        to_emit: list[tuple[str, str]] = []
+        with self._lock:
+            total_pending = self._buffer_lens["stdout"] + self._buffer_lens["stderr"]
+            remaining_pending = self._max_pending_chars - total_pending
+            if remaining_pending <= 0:
+                return
+            if len(text) > remaining_pending:
+                text = text[:remaining_pending]
+            self._buffers[stream].append(text)
+            self._buffer_lens[stream] += len(text)
+            if self._buffer_lens[stream] >= self._max_batch_chars:
+                flushed = "".join(self._buffers[stream])
+                self._buffers[stream].clear()
+                self._buffer_lens[stream] = 0
+                to_emit.append((stream, flushed))
+
+        for st, chunk in to_emit:
+            try:
+                self._emit_fn(self._execution_id, st, chunk)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Error emitting batched output chunk: %s", exc)
+
+    def _flush_locked(self) -> list[tuple[str, str]]:
+        to_emit: list[tuple[str, str]] = []
+        for stream in ("stdout", "stderr"):
+            if self._buffers[stream]:
+                flushed = "".join(self._buffers[stream])
+                self._buffers[stream].clear()
+                self._buffer_lens[stream] = 0
+                to_emit.append((stream, flushed))
+        return to_emit
+
+    def flush(self) -> None:
+        """Flush any pending buffered output immediately."""
+        with self._lock:
+            to_emit = self._flush_locked()
+        for stream, chunk in to_emit:
+            try:
+                self._emit_fn(self._execution_id, stream, chunk)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Error emitting batched output chunk: %s", exc)
+
+    def _flusher_loop(self) -> None:
+        while not self._stopped.is_set():
+            self._stopped.wait(timeout=self._flush_interval)
+            self.flush()
+
+    def close(self) -> None:
+        """Stop background flusher thread and perform final flush."""
+        self._stopped.set()
+        if self._flusher_thread.is_alive():
+            self._flusher_thread.join(timeout=0.2)
+        self.flush()
 
 
 def _drain_stream(
@@ -718,29 +818,46 @@ def _drain_stream(
     max_bytes: int,
     overflow_flag: list[bool],
     lock: threading.Lock,
+    stream_name: str = "stdout",
+    batcher: OutputBatcher | None = None,
+    total_bytes_counter: list[int] | None = None,
 ) -> None:
     """Drain stream concurrently until EOF, retaining up to max_bytes without pipe deadlocks."""
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     try:
+        read_fn = stream.read1 if hasattr(stream, "read1") else stream.read
         while True:
-            chunk = stream.read(4096)
+            chunk = read_fn(4096)
             if not chunk:
+                if batcher is not None:
+                    final_text = decoder.decode(b"", final=True)
+                    if final_text:
+                        batcher.push(stream_name, final_text)
                 break
+
+            text_to_emit = ""
             with lock:
+                if total_bytes_counter is not None:
+                    total_bytes_counter[0] += len(chunk)
                 remaining = max_bytes - len(buffer)
                 if remaining > 0:
                     to_take = min(len(chunk), remaining)
                     buffer.extend(chunk[:to_take])
                     if len(chunk) > to_take:
                         overflow_flag[0] = True
+                    text_to_emit = decoder.decode(chunk[:to_take], final=False)
                 else:
                     overflow_flag[0] = True
+
+            if batcher is not None and text_to_emit:
+                batcher.push(stream_name, text_to_emit)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("Error draining stream: %s", exc)
+        logger.debug("Error draining stream %s: %s", stream_name, exc)
     finally:
         try:
             stream.close()
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Error closing stream: %s", exc)
+            logger.debug("Error closing stream %s: %s", stream_name, exc)
 
 
 def open_directory_descriptor(workspace_root: Path, target_dir: Path) -> int:
@@ -818,9 +935,10 @@ class ExecutionManager:
     - Environment sanitization.
     - Dedicated single-worker pool ensuring no saturation of main assistant pool.
     - Concurrency limit (1 active subprocess).
-    - Concurrent stdout/stderr draining preventing pipe deadlock.
+    - Concurrent stdout/stderr draining with live incremental output delivery.
     - Bounded memory buffer (256 KB) with overflow tracking.
     - Wall-clock timeouts with process-group cleanup (SIGTERM -> SIGKILL).
+    - Scoped cancellation by execution_id.
     """
 
     def __init__(
@@ -832,6 +950,8 @@ class ExecutionManager:
         max_timeout: float = MAX_TIMEOUT_SECONDS,
         path_resolver: WorkspacePathResolver | None = None,
         event_recorder: Callable[[str, str, str | None, dict[str, Any]], None] | None = None,
+        output_listener: "OutputChunkListener | None" = None,
+        lifecycle_listener: "LifecycleListener | None" = None,
     ) -> None:
         if path_resolver is not None:
             self._path_resolver = path_resolver
@@ -848,10 +968,19 @@ class ExecutionManager:
         self._default_timeout = default_timeout
         self._max_timeout = max_timeout
         self._event_recorder = event_recorder
+        self._output_listener: OutputChunkListener | None = output_listener
+        self._lifecycle_listener: LifecycleListener | None = lifecycle_listener
 
         # Concurrency guard: strictly 1 active subprocess
         self._concurrency_lock = threading.Lock()
         self._is_executing = False
+
+        # Active execution tracking for scoped cancellation (O(1) bounded to single active execution)
+        self._active_execution_id: str | None = None
+        self._active_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
+        self._active_pgid: int | None = None
+        self._active_cancellation_requested: bool = False
+        self._active_terminated: bool = False
 
         # Isolated thread pool for subprocess management
         self._executor_pool = concurrent.futures.ThreadPoolExecutor(
@@ -859,6 +988,39 @@ class ExecutionManager:
             thread_name_prefix="orion-subprocess-worker",
         )
         self._is_shut_down = False
+
+    def set_output_listener(self, listener: "OutputChunkListener | None") -> None:
+        """Set or replace the incremental output listener (thread-safe: written before execution)."""
+        self._output_listener = listener
+
+    def set_lifecycle_listener(self, listener: "LifecycleListener | None") -> None:
+        """Set or replace the lifecycle event listener."""
+        self._lifecycle_listener = listener
+
+    def cancel(self, execution_id: str) -> bool:
+        """Cancel the active execution identified by execution_id.
+
+        Returns True if the execution was found and cancellation was initiated.
+        Returns False if no matching active execution exists.
+
+        Thread-safe: may be called from any thread while execution is in progress.
+        """
+        with self._concurrency_lock:
+            if (
+                self._active_execution_id != execution_id
+                or not self._is_executing
+                or self._active_cancellation_requested
+            ):
+                return False
+            self._active_cancellation_requested = True
+            proc = self._active_proc
+            pgid = self._active_pgid
+
+        if proc is not None:
+            logger.info("Cancelling execution %s", execution_id)
+            self._terminate_execution_once(execution_id, proc, pgid=pgid)
+            return True
+        return False
 
     @property
     def workspace_root(self) -> Path:
@@ -952,6 +1114,9 @@ class ExecutionManager:
                     "Another subprocess is currently executing. Concurrency limit is 1."
                 )
             self._is_executing = True
+            self._active_execution_id = request.execution_id
+            self._active_proc = None
+            self._active_pgid = None
 
         started_at = utc_now()
         start_mono = time.monotonic()
@@ -959,6 +1124,7 @@ class ExecutionManager:
         dir_fd = -1
         proc = None
         pgid = None
+        batcher: OutputBatcher | None = None
 
         self._record_event(
             "tool.execution.requested",
@@ -970,6 +1136,18 @@ class ExecutionManager:
                 "timeout_seconds": request.timeout_seconds,
                 "conversation_id": request.conversation_id,
                 "client_request_id": request.client_request_id,
+            },
+        )
+
+        # Notify lifecycle listener that execution started
+        self._emit_lifecycle(
+            request.execution_id,
+            "started",
+            {
+                "command": request.command,
+                "args": list(request.args),
+                "cwd": str(request.cwd),
+                "timeout_seconds": request.timeout_seconds,
             },
         )
 
@@ -1046,6 +1224,11 @@ class ExecutionManager:
             )
             pgid = proc.pid
 
+            # Register active process for cancellation
+            with self._concurrency_lock:
+                self._active_proc = proc
+                self._active_pgid = pgid
+
             self._record_event(
                 "tool.execution.started",
                 request.execution_id,
@@ -1057,21 +1240,79 @@ class ExecutionManager:
                 },
             )
 
-            # 4. Concurrent Stream Draining
+            # 4. Concurrent Stream Draining with optional live output
             stdout_buffer = bytearray()
             stderr_buffer = bytearray()
             buffer_lock = threading.Lock()
             overflow = [False]
 
+            # Create output batcher if listener is configured
+            output_listener = self._output_listener
+            if output_listener is not None:
+                batcher = OutputBatcher(
+                    execution_id=request.execution_id,
+                    emit_fn=output_listener,
+                )
+            else:
+                batcher = None
+
+            # Wire per-request listener if present (from ExecutionRequest)
+            req_listener = getattr(request, "output_listener", None)
+            if req_listener is not None and batcher is None:
+                batcher = OutputBatcher(
+                    execution_id=request.execution_id,
+                    emit_fn=req_listener,
+                )
+            elif req_listener is not None and batcher is not None:
+                # Wrap both listeners
+                _orig_listener = output_listener
+                _req_listener = req_listener
+
+                def _combined_listener(eid: str, stream: str, text: str) -> None:
+                    if _orig_listener:
+                        try:
+                            _orig_listener(eid, stream, text)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("Output listener error: %s", exc)
+                    try:
+                        _req_listener(eid, stream, text)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("Request output listener error: %s", exc)
+
+                batcher = OutputBatcher(
+                    execution_id=request.execution_id,
+                    emit_fn=_combined_listener,
+                )
+
             half_cap = self._max_output_bytes // 2
+            stdout_total_bytes = [0]
+            stderr_total_bytes = [0]
             t_out = threading.Thread(
                 target=_drain_stream,
-                args=(proc.stdout, stdout_buffer, half_cap, overflow, buffer_lock),
+                args=(
+                    proc.stdout,
+                    stdout_buffer,
+                    half_cap,
+                    overflow,
+                    buffer_lock,
+                    "stdout",
+                    batcher,
+                    stdout_total_bytes,
+                ),
                 daemon=True,
             )
             t_err = threading.Thread(
                 target=_drain_stream,
-                args=(proc.stderr, stderr_buffer, half_cap, overflow, buffer_lock),
+                args=(
+                    proc.stderr,
+                    stderr_buffer,
+                    half_cap,
+                    overflow,
+                    buffer_lock,
+                    "stderr",
+                    batcher,
+                    stderr_total_bytes,
+                ),
                 daemon=True,
             )
             t_out.start()
@@ -1083,22 +1324,34 @@ class ExecutionManager:
                 proc.wait(timeout=request.timeout_seconds)
             except subprocess.TimeoutExpired:
                 is_timeout = True
-                self._terminate_process_group(proc, pgid=pgid)
+                self._terminate_execution_once(request.execution_id, proc, pgid=pgid)
 
-            # Close pipe streams explicitly on parent side to unblock drainers
-            try:
-                if proc.stdout and not proc.stdout.closed:
-                    proc.stdout.close()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Failed closing stdout pipe: %s", exc)
-            try:
-                if proc.stderr and not proc.stderr.closed:
-                    proc.stderr.close()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Failed closing stderr pipe: %s", exc)
+            # Reap child process before joining reader threads so OS closes pipe write ends
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
 
-            t_out.join(timeout=0.5)
-            t_err.join(timeout=0.5)
+            # Wait for reader threads to observe EOF and close their own BufferedReaders safely
+            t_out.join(timeout=1.0)
+            t_err.join(timeout=1.0)
+            if t_out.is_alive():
+                logger.warning(
+                    "Stdout reader thread for %s did not exit within 1.0s "
+                    "(a detached descendant may still hold the pipe open).",
+                    request.execution_id,
+                )
+            if t_err.is_alive():
+                logger.warning(
+                    "Stderr reader thread for %s did not exit within 1.0s "
+                    "(a detached descendant may still hold the pipe open).",
+                    request.execution_id,
+                )
+
+            # Final batcher flush to guarantee all output is delivered
+            if batcher is not None:
+                batcher.close()
 
             completed_at = utc_now()
             duration_ms = (time.monotonic() - start_mono) * 1000.0
@@ -1106,6 +1359,53 @@ class ExecutionManager:
             out_text = stdout_buffer.decode("utf-8", errors="replace")
             err_text = stderr_buffer.decode("utf-8", errors="replace")
             truncated = overflow[0]
+            out_bytes_count = stdout_total_bytes[0]
+            err_bytes_count = stderr_total_bytes[0]
+
+            # Check if cancellation was requested for this execution
+            with self._concurrency_lock:
+                was_cancelled = (
+                    self._active_execution_id == request.execution_id
+                    and self._active_cancellation_requested
+                )
+
+            if was_cancelled:
+                self._record_event(
+                    "tool.execution.cancelled",
+                    request.execution_id,
+                    {
+                        "command": request.command,
+                        "duration_ms": duration_ms,
+                        "truncated": truncated,
+                        "stdout_bytes": out_bytes_count,
+                        "stderr_bytes": err_bytes_count,
+                    },
+                )
+                self._emit_lifecycle(
+                    request.execution_id,
+                    "cancelled",
+                    {
+                        "exit_code": proc.returncode,
+                        "duration_ms": duration_ms,
+                        "truncated": truncated,
+                        "error_message": "Execution was cancelled.",
+                    },
+                )
+                return ExecutionOutput(
+                    execution_id=request.execution_id,
+                    command=request.command,
+                    exit_code=proc.returncode,
+                    status=ExecutionStatus.CANCELLED,
+                    stdout=out_text,
+                    stderr=err_text,
+                    truncated=truncated,
+                    duration_ms=duration_ms,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    error_message="Execution was cancelled.",
+                    stdout_bytes=out_bytes_count,
+                    stderr_bytes=err_bytes_count,
+                )
 
             if is_timeout:
                 self._record_event(
@@ -1115,6 +1415,20 @@ class ExecutionManager:
                         "command": request.command,
                         "timeout_seconds": request.timeout_seconds,
                         "duration_ms": duration_ms,
+                        "truncated": truncated,
+                        "stdout_bytes": out_bytes_count,
+                        "stderr_bytes": err_bytes_count,
+                    },
+                )
+                self._emit_lifecycle(
+                    request.execution_id,
+                    "timed_out",
+                    {
+                        "exit_code": proc.returncode,
+                        "duration_ms": duration_ms,
+                        "truncated": truncated,
+                        "timeout_seconds": request.timeout_seconds,
+                        "error_message": f"Command '{request.command}' timed out after {request.timeout_seconds:.1f}s.",
                     },
                 )
                 return ExecutionOutput(
@@ -1129,6 +1443,8 @@ class ExecutionManager:
                     started_at=started_at,
                     completed_at=completed_at,
                     error_message=f"Command '{request.command}' timed out after {request.timeout_seconds:.1f}s.",
+                    stdout_bytes=out_bytes_count,
+                    stderr_bytes=err_bytes_count,
                 )
 
             # 6. Normal completion
@@ -1145,8 +1461,20 @@ class ExecutionManager:
                     "status": status.value,
                     "duration_ms": duration_ms,
                     "truncated": truncated,
-                    "stdout_bytes": len(stdout_buffer),
-                    "stderr_bytes": len(stderr_buffer),
+                    "stdout_bytes": out_bytes_count,
+                    "stderr_bytes": err_bytes_count,
+                },
+            )
+            self._emit_lifecycle(
+                request.execution_id,
+                status.value,
+                {
+                    "exit_code": exit_code,
+                    "duration_ms": duration_ms,
+                    "truncated": truncated,
+                    "error_message": None
+                    if exit_code == 0
+                    else f"Process exited with code {exit_code}",
                 },
             )
 
@@ -1162,6 +1490,8 @@ class ExecutionManager:
                 started_at=started_at,
                 completed_at=completed_at,
                 error_message=None if exit_code == 0 else f"Process exited with code {exit_code}",
+                stdout_bytes=out_bytes_count,
+                stderr_bytes=err_bytes_count,
             )
 
         except Exception as exc:  # noqa: BLE001
@@ -1180,6 +1510,16 @@ class ExecutionManager:
                     "status": "failed",
                     "error": str(exc),
                     "duration_ms": duration_ms,
+                },
+            )
+            self._emit_lifecycle(
+                request.execution_id,
+                "failed",
+                {
+                    "exit_code": -1,
+                    "duration_ms": duration_ms,
+                    "truncated": False,
+                    "error_message": str(exc),
                 },
             )
 
@@ -1205,6 +1545,11 @@ class ExecutionManager:
                     pass
             with self._concurrency_lock:
                 self._is_executing = False
+                self._active_execution_id = None
+                self._active_proc = None
+                self._active_pgid = None
+                self._active_cancellation_requested = False
+                self._active_terminated = False
 
     @staticmethod
     def _is_process_group_alive(pgid: int) -> bool:
@@ -1217,7 +1562,9 @@ class ExecutionManager:
         except (ProcessLookupError, PermissionError):
             return False
 
-    def _terminate_process_group(self, proc: subprocess.Popen, pgid: int | None = None) -> None:
+    def _terminate_process_group(
+        self, proc: subprocess.Popen, pgid: int | None = None, *, close_pipes: bool = True
+    ) -> None:
         """Safely terminate child's process group, escalating from SIGTERM to SIGKILL.
 
         Security boundary and containment limitation:
@@ -1267,21 +1614,50 @@ class ExecutionManager:
             except (subprocess.TimeoutExpired, Exception) as exc:  # noqa: BLE001
                 logger.debug("Process wait error during SIGKILL cleanup: %s", exc)
 
-        # 4. Explicitly close pipe streams on parent side to unblock drainers
-        try:
-            if proc.stdout and not proc.stdout.closed:
-                proc.stdout.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Failed closing stdout pipe during termination: %s", exc)
-        try:
-            if proc.stderr and not proc.stderr.closed:
-                proc.stderr.close()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Failed closing stderr pipe during termination: %s", exc)
+        if close_pipes:
+            try:
+                if proc.stdout and not proc.stdout.closed:
+                    proc.stdout.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed closing stdout pipe during termination: %s", exc)
+            try:
+                if proc.stderr and not proc.stderr.closed:
+                    proc.stderr.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed closing stderr pipe during termination: %s", exc)
+
+    def _terminate_execution_once(
+        self,
+        execution_id: str,
+        proc: subprocess.Popen,
+        pgid: int | None = None,
+    ) -> None:
+        """Idempotently terminate an execution's process group once across cancel/shutdown/timeout."""
+        with self._concurrency_lock:
+            if self._active_execution_id != execution_id or self._active_terminated:
+                return
+            self._active_terminated = True
+        self._terminate_process_group(proc, pgid=pgid, close_pipes=False)
 
     def shutdown(self, wait: bool = True, timeout: float = 5.0) -> None:
-        """Shut down the isolated worker pool cleanly."""
+        """Shut down the isolated worker pool cleanly.
+
+        Cancels any active execution before shutting down the worker pool.
+        """
         self._is_shut_down = True
+
+        # Cancel any active execution during shutdown
+        with self._concurrency_lock:
+            active_id = self._active_execution_id
+            proc = self._active_proc
+            pgid = self._active_pgid
+            if active_id is not None:
+                self._active_cancellation_requested = True
+
+        if proc is not None and active_id is not None:
+            logger.info("Shutdown: cancelling active execution %s", active_id)
+            self._terminate_execution_once(active_id, proc, pgid=pgid)
+
         self._executor_pool.shutdown(wait=wait, cancel_futures=True)
 
     def _record_event(self, event_type: str, execution_id: str, payload: dict[str, Any]) -> None:
@@ -1290,3 +1666,16 @@ class ExecutionManager:
                 self._event_recorder(event_type, "tool_execution", execution_id, payload)
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to record execution audit event: %s", event_type)
+
+    def _emit_lifecycle(
+        self,
+        execution_id: str,
+        event: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Emit a lifecycle event to the lifecycle listener if configured."""
+        if self._lifecycle_listener is not None:
+            try:
+                self._lifecycle_listener(execution_id, event, payload)
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to emit lifecycle event '%s' for %s", event, execution_id)
