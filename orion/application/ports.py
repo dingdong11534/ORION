@@ -217,6 +217,22 @@ class ConversationStore(Protocol):
         """
         ...
 
+    def recover_pending_requests(
+        self,
+        reason: str = "Previous ORION process ended before generation completed.",
+    ) -> int:
+        """Transition abandoned pending assistant messages to interrupted.
+
+        Called during startup after acquiring single-instance lock and verifying migrations.
+        Does not touch completed, failed, or already interrupted messages.
+        Keeps user messages completed.
+        Returns the count of recovered messages.
+
+        Raises:
+            PersistenceError: On database failure.
+        """
+        ...
+
     def load_activity(
         self,
         limit: int = _DEFAULT_HISTORY_LIMIT,

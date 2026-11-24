@@ -1,5 +1,6 @@
 """Application entry point for ORION desktop assistant."""
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from sqlalchemy import Engine, text
 from orion.application.assistant_service import AssistantService
 from orion.application.ports import ModelProvider
 from orion.infrastructure.fake_model_provider import FakeModelProvider
+from orion.infrastructure.lifecycle import ApplicationLifecycle
 from orion.infrastructure.ollama_model_provider import OllamaModelProvider
 from orion.infrastructure.persistence.database import (
     create_db_engine,
@@ -25,10 +27,28 @@ from orion.infrastructure.persistence.repositories import (
     SqliteConversationStore,
     SqliteSettingsStore,
 )
+from orion.infrastructure.single_instance import SingleInstanceManager
 from orion.ui.qt_bridge import OrionBridge
+
+logger = logging.getLogger(__name__)
 
 # Maintained for backward compatibility with existing tests
 _EXPECTED_ALEMBIC_REVISION = "0002"
+
+
+def activate_window(engine: QQmlApplicationEngine) -> None:
+    """Best-effort activation of the primary QML application window.
+
+    Raises the window and requests focus. In Wayland environments, window focus
+    may be compositor-controlled and activation is executed on a best-effort basis.
+    """
+    for root in engine.rootObjects():
+        if hasattr(root, "show"):
+            root.show()
+        if hasattr(root, "raise_"):
+            root.raise_()
+        if hasattr(root, "requestActivate"):
+            root.requestActivate()
 
 
 def get_alembic_head_revision(ini_path: Path | None = None) -> str:
@@ -113,64 +133,96 @@ def main() -> int:
     app.setApplicationName("ORION")
     app.setOrganizationName("ORION")
 
-    # 1. Resolve production database path
-    db_path = get_database_path()
+    # 1. Single-instance acquisition FIRST (before any DB write, migration, or recovery)
+    single_instance = SingleInstanceManager()
+    if not single_instance.try_acquire():
+        # Another live instance owns the lock -> notify it to activate its window
+        if single_instance.notify_primary():
+            return 0
+        print(
+            "Another ORION instance appears to be running (lock held), but failed to respond to activation.",
+            file=sys.stderr,
+        )
+        return 1
 
-    # 2. Create engine & initialize SQLite PRAGMAs
-    engine = create_db_engine(db_path)
-    init_database(engine, apply_wal=True)
-
-    # 3. Verify that the required Alembic migration has been applied (dynamically checking head)
+    engine = None
+    lifecycle = None
     try:
-        check_database_migration(engine)
-    except RuntimeError as exc:
-        print(f"ORION STARTUP ERROR:\n{exc}", file=sys.stderr)
-        engine.dispose()
-        return 1
+        # 2. Start IPC server for secondary instance activation
+        single_instance.start_ipc_server()
 
-    # 4. Create session factory
-    session_factory = create_session_factory(engine)
+        # 3. Resolve production database path & create engine
+        db_path = get_database_path()
+        engine = create_db_engine(db_path)
+        init_database(engine, apply_wal=True)
 
-    # 5. Construct repository stores
-    conversation_store = SqliteConversationStore(session_factory)
-    settings_store = SqliteSettingsStore(session_factory)
+        # 4. Verify that the required Alembic migration has been applied (dynamically checking head)
+        try:
+            check_database_migration(engine)
+        except RuntimeError as exc:
+            print(f"ORION STARTUP ERROR:\n{exc}", file=sys.stderr)
+            return 1
 
-    # 6. Construct model provider & inject dependencies into AssistantService
-    try:
-        model_provider = create_model_provider()
-    except ValueError as exc:
-        print(f"ORION CONFIGURATION ERROR:\n{exc}", file=sys.stderr)
-        engine.dispose()
-        return 1
+        # 5. Create session factory & construct repositories
+        session_factory = create_session_factory(engine)
+        conversation_store = SqliteConversationStore(session_factory)
+        settings_store = SqliteSettingsStore(session_factory)
 
-    assistant_service = AssistantService(
-        model_provider=model_provider,
-        conversation_store=conversation_store,
-        settings_store=settings_store,
-    )
+        # 6. Crash recovery of abandoned pending requests (BEFORE QML or UI loads!)
+        recovered_count = conversation_store.recover_pending_requests()
+        if recovered_count > 0:
+            logger.info(
+                "Recovered %d abandoned pending assistant request(s) on startup.", recovered_count
+            )
 
-    # 7. Construct OrionBridge
-    bridge = OrionBridge(assistant_service=assistant_service)
+        # 7. Construct model provider & inject dependencies into AssistantService
+        try:
+            model_provider = create_model_provider()
+        except ValueError as exc:
+            print(f"ORION CONFIGURATION ERROR:\n{exc}", file=sys.stderr)
+            return 1
 
-    # 8. Coordinate safe shutdown: drain workers FIRST, then dispose database engine
-    def on_shutdown() -> None:
-        bridge.shutdown()
-        engine.dispose()
+        assistant_service = AssistantService(
+            model_provider=model_provider,
+            conversation_store=conversation_store,
+            settings_store=settings_store,
+        )
 
-    app.aboutToQuit.connect(on_shutdown)
+        # 8. Construct OrionBridge & coordinate graceful lifecycle
+        bridge = OrionBridge(assistant_service=assistant_service)
+        lifecycle = ApplicationLifecycle(
+            single_instance=single_instance,
+            bridge=bridge,
+            engine=engine,
+        )
+        app.aboutToQuit.connect(lifecycle.shutdown)
 
-    # 9. Load QML interface
-    qml_engine = QQmlApplicationEngine()
-    qml_engine.rootContext().setContextProperty("orion", bridge)
+        # 9. Load QML interface
+        qml_engine = QQmlApplicationEngine()
+        qml_engine.rootContext().setContextProperty("orion", bridge)
 
-    qml_file = Path(__file__).parent / "ui" / "qml" / "Main.qml"
-    qml_engine.load(QUrl.fromLocalFile(str(qml_file.resolve())))
+        single_instance.activationRequested.connect(lambda: activate_window(qml_engine))
 
-    if not qml_engine.rootObjects():
-        print("ERROR: Failed to load ORION interface.", file=sys.stderr)
-        return 1
+        qml_file = Path(__file__).parent / "ui" / "qml" / "Main.qml"
+        qml_engine.load(QUrl.fromLocalFile(str(qml_file.resolve())))
 
-    return app.exec()
+        if not qml_engine.rootObjects():
+            print("ERROR: Failed to load ORION interface.", file=sys.stderr)
+            return 1
+
+        return app.exec()
+    finally:
+        if lifecycle is not None:
+            # aboutToQuit uses the default 5 s timeout; this final call blocks
+            # indefinitely so the process never exits with active workers.
+            lifecycle.shutdown(timeout_ms=-1)
+        else:
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:  # noqa: BLE001, S110
+                    pass
+            single_instance.cleanup()
 
 
 if __name__ == "__main__":

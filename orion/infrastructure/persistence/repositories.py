@@ -722,6 +722,56 @@ class SqliteConversationStore:
 
         return _with_busy_retry(_run)
 
+    def recover_pending_requests(
+        self,
+        reason: str = "Previous ORION process ended before generation completed.",
+    ) -> int:
+        """Transition abandoned pending assistant messages to interrupted.
+
+        Executed on application startup after acquiring the single-instance lock and
+        verifying database migrations. Only assistant messages in 'pending' status
+        are transitioned. Completed, failed, and already interrupted messages remain
+        untouched. User messages remain completed.
+
+        Returns the count of recovered messages.
+        """
+        cleaned_reason = (
+            reason.strip()
+            if reason and reason.strip()
+            else "Previous ORION process ended before generation completed."
+        )
+
+        def _run() -> int:
+            with self._factory() as session:
+                stmt = select(MessageModel).where(
+                    MessageModel.role == "assistant",
+                    MessageModel.status == "pending",
+                )
+                pending_messages = list(session.scalars(stmt).all())
+                if not pending_messages:
+                    return 0
+
+                now = utc_now()
+                affected_conv_ids: set[str] = set()
+                for asst in pending_messages:
+                    asst.status = "interrupted"
+                    asst.error_message = cleaned_reason
+                    asst.updated_at = now
+                    affected_conv_ids.add(asst.conversation_id)
+                    session.add(_evt_response_interrupted(asst))
+
+                for conv_id in affected_conv_ids:
+                    session.execute(
+                        update(ConversationModel)
+                        .where(ConversationModel.id == conv_id)
+                        .values(updated_at=now)
+                    )
+
+                session.commit()
+                return len(pending_messages)
+
+        return _with_busy_retry(_run)
+
     def _get_assistant_message(
         self, session: Session, conversation_id: str, client_request_id: str
     ) -> MessageModel | None:

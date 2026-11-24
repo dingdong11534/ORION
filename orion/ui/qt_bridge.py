@@ -378,13 +378,27 @@ class OrionBridge(QObject):
             self._set_busy(False)
 
     @Slot()
-    def shutdown(self, timeout_ms: int = -1) -> bool:
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
         """Coordinate safe application shutdown.
 
-        Stops accepting new requests, drains the dedicated thread pool, and ensures
-        all workers and signals remain alive until execution has completed.
+        Stops accepting new requests, signals cancellation to active streaming workers,
+        drains the dedicated thread pool, and ensures all workers and signals remain alive
+        until execution has completed.
+
+        Resumable: if the first call times out, subsequent calls skip cancellation
+        signaling and proceed directly to draining.
+
+        Returns True when all workers have finished; False if the timeout elapsed
+        with workers still active.
         """
-        self._is_shutting_down = True
+        if not self._is_shutting_down:
+            self._is_shutting_down = True
+
+            # Signal cancellation for any active generation requests (once only)
+            if self._current_request_id is not None:
+                self._cancelled_request_ids.add(self._current_request_id)
+            if hasattr(self._service, "cancel_all_requests"):
+                self._service.cancel_all_requests()
 
         drained = self._thread_pool.waitForDone(timeout_ms)
         if not drained:

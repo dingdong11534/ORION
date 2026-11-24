@@ -388,6 +388,28 @@ class AssistantService:
             return True
         return False
 
+    def cancel_all_requests(self) -> int:
+        """Cancel all active in-flight generation requests concurrently.
+
+        Returns the number of active cancellation tokens signaled.
+        """
+        with self._cancellations_lock:
+            tokens = list(self._active_cancellations.values())
+        for token in tokens:
+            token.cancel()
+        return len(tokens)
+
+    def recover_pending_requests(self, reason: str | None = None) -> int:
+        """Recover abandoned pending assistant requests from prior process run.
+
+        Delegates to ConversationStore.recover_pending_requests.
+        """
+        if hasattr(self._conversation_store, "recover_pending_requests"):
+            return self._conversation_store.recover_pending_requests(
+                reason or "Previous ORION process ended before generation completed."
+            )
+        return 0
+
     def stream_message(
         self,
         content_or_request: str | ChatRequest,
