@@ -108,16 +108,53 @@ class PermissionEngine(PermissionEnginePort):
                 tool_id=tool_id,
             )
 
-        # 3. Path argument check for sensitive system locations (if paths present in arguments)
+        # 3. Path argument check for traversal, sensitive locations, and confinement
         for arg_key, arg_val in invocation.arguments.items():
-            if isinstance(arg_val, str) and any(
-                frag in arg_val for frag in self._policy.prohibited_path_fragments
-            ):
-                return PermissionDecision(
-                    outcome=PermissionOutcome.DENY,
-                    reason=f"Argument '{arg_key}' references prohibited sensitive system path fragment.",
-                    tool_id=tool_id,
-                )
+            if isinstance(arg_val, str) and arg_val.strip():
+                # 3a. Reject absolute paths and .. traversal syntax
+                if arg_val.startswith(("/", "\\")) or ".." in Path(arg_val).parts:
+                    return PermissionDecision(
+                        outcome=PermissionOutcome.DENY,
+                        reason=f"Argument '{arg_key}' contains invalid absolute or traversal path syntax: {arg_val!r}",
+                        tool_id=tool_id,
+                    )
+
+                # 3b. Check prohibited sensitive path fragments
+                if any(frag in arg_val for frag in self._policy.prohibited_path_fragments):
+                    return PermissionDecision(
+                        outcome=PermissionOutcome.DENY,
+                        reason=f"Argument '{arg_key}' references prohibited sensitive system path fragment.",
+                        tool_id=tool_id,
+                    )
+
+                # 3c. If workspace_root is configured, enforce strict path confinement
+                if self._policy.workspace_root is not None and arg_key in (
+                    "path",
+                    "target",
+                    "file",
+                ):
+                    try:
+                        resolved_root = self._policy.workspace_root.resolve()
+                        candidate = (resolved_root / arg_val).resolve()
+                        if candidate != resolved_root and resolved_root not in candidate.parents:
+                            return PermissionDecision(
+                                outcome=PermissionOutcome.DENY,
+                                reason=f"Path '{arg_val}' escapes authorized workspace root.",
+                                tool_id=tool_id,
+                            )
+                        raw_target = resolved_root / arg_val
+                        if raw_target.is_symlink():
+                            return PermissionDecision(
+                                outcome=PermissionOutcome.DENY,
+                                reason=f"Path '{arg_val}' is a symlink (symlinks are prohibited).",
+                                tool_id=tool_id,
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        return PermissionDecision(
+                            outcome=PermissionOutcome.DENY,
+                            reason=f"Failed to validate path confinement for '{arg_val}': {exc}",
+                            tool_id=tool_id,
+                        )
 
         # 4. System execution policy
         if tool.permission_level == PermissionLevel.SYSTEM_EXECUTE:
