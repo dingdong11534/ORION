@@ -216,38 +216,61 @@ class ToolRouter:
         """Execute a validated and approved resolution."""
         from orion.application.tools.approvals import ApprovalStatus
 
-        if resolution.status != ApprovalStatus.APPROVED or resolution.invocation is None:
+        if resolution.status != ApprovalStatus.APPROVED:
             return RouterDecision(
                 disposition=RouterDisposition.DENIED,
                 proposal=ToolProposal(tool_id="unknown", arguments={}),
                 error_message=f"Cannot execute unapproved resolution: {resolution.reason}",
             )
 
-        trusted_invocation = resolution.invocation
-        tool = self._registry.require(trusted_invocation.tool_id)
+        if self._approval_broker is None:
+            return RouterDecision(
+                disposition=RouterDisposition.DENIED,
+                proposal=ToolProposal(tool_id="unknown", arguments={}),
+                error_message="Unauthorized approval resolution: no approval broker configured.",
+            )
+
+        # Enforce cryptographic single-use authorization token validation and retrieve
+        # the immutable broker-retained ToolInvocation snapshot
+        approved_invocation = self._approval_broker.consume_authorization(
+            resolution.approval_id, resolution.auth_token
+        )
+        if approved_invocation is None:
+            return RouterDecision(
+                disposition=RouterDisposition.DENIED,
+                proposal=ToolProposal(
+                    tool_id=resolution.invocation.tool_id if resolution.invocation else "unknown",
+                    arguments=resolution.invocation.arguments if resolution.invocation else {},
+                ),
+                invocation=resolution.invocation,
+                error_message="Unauthorized approval resolution: authorization token invalid, forged, or replayed.",
+            )
+
+        # Execute strictly the broker-retained invocation snapshot
+        tool = self._registry.require(approved_invocation.tool_id)
 
         result = None
         if self._executor is not None:
             try:
-                result = self._executor.execute(tool, trusted_invocation)
+                result = self._executor.execute(tool, approved_invocation)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Executor raised unexpected error on approved invocation: %s", exc)
                 return RouterDecision(
                     disposition=RouterDisposition.DISPATCHED,
                     proposal=ToolProposal(
-                        tool_id=trusted_invocation.tool_id,
-                        arguments=trusted_invocation.arguments,
+                        tool_id=approved_invocation.tool_id,
+                        arguments=approved_invocation.arguments,
                     ),
-                    invocation=trusted_invocation,
+                    invocation=approved_invocation,
                     error_message=f"Tool execution failed: {exc}",
                 )
 
         return RouterDecision(
             disposition=RouterDisposition.DISPATCHED,
             proposal=ToolProposal(
-                tool_id=trusted_invocation.tool_id,
-                arguments=trusted_invocation.arguments,
+                tool_id=approved_invocation.tool_id,
+                arguments=approved_invocation.arguments,
             ),
-            invocation=trusted_invocation,
+            invocation=approved_invocation,
             result=result,
         )
