@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Property, QObject, QThreadPool, Signal, Slot
 
@@ -17,6 +17,9 @@ from orion.application.contracts import (
     generate_request_id,
 )
 from orion.infrastructure.workers import Worker, WorkerSignals
+
+if TYPE_CHECKING:
+    from orion.application.tools.approvals import ApprovalBroker
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +66,22 @@ class OrionBridge(QObject):
     conversationCreated = Signal(dict)
     conversationDeleted = Signal(str)
 
+    approvalRequested = Signal(dict)
+    approvalResolved = Signal(str, str)
+    approvalCancelled = Signal(str)
+
     def __init__(
         self,
         assistant_service: AssistantService,
         thread_pool: QThreadPool | None = None,
         parent: QObject | None = None,
+        approval_broker: "ApprovalBroker | None" = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
+        self._approval_broker = approval_broker
+        if self._approval_broker is not None:
+            self._approval_broker.set_request_listener(self._handle_approval_requested)
 
         if thread_pool is not None:
             self._thread_pool = thread_pool
@@ -228,6 +239,41 @@ class OrionBridge(QObject):
         req_id = self._current_request_id
         self._cancelled_request_ids.add(req_id)
         self._service.cancel_request(req_id)
+        if self._approval_broker is not None:
+            cancelled_ids = self._approval_broker.cancel_for_request(req_id)
+            for aid in cancelled_ids:
+                self.approvalCancelled.emit(aid)
+
+    @Slot(str, str, bool)
+    def submitApprovalDecision(self, approval_id: str, nonce: str, approved: bool) -> None:
+        """Submit user approval or rejection decision to the approval broker."""
+        if self._approval_broker is None:
+            logger.warning("No approval broker configured on OrionBridge.")
+            return
+        resolution = self._approval_broker.resolve(
+            approval_id=approval_id,
+            nonce=nonce,
+            approved=approved,
+        )
+        self.approvalResolved.emit(approval_id, resolution.status.value)
+
+    @Slot(str)
+    def cancelApproval(self, approval_id: str) -> None:
+        """Cancel a pending approval request."""
+        if self._approval_broker is None:
+            return
+        req = self._approval_broker.get_pending(approval_id)
+        if req is not None:
+            cancelled_ids = self._approval_broker.cancel_for_request(req.client_request_id)
+            for aid in cancelled_ids:
+                self.approvalCancelled.emit(aid)
+
+    def _handle_approval_requested(self, request_data: Any) -> None:
+        """Bridge listener forwarding new approval requests to QML."""
+        if hasattr(request_data, "to_ui_dict"):
+            self.approvalRequested.emit(request_data.to_ui_dict())
+        elif isinstance(request_data, dict):
+            self.approvalRequested.emit(request_data)
 
     @Slot(str)
     def sendMessage(self, message: str) -> None:
@@ -399,6 +445,10 @@ class OrionBridge(QObject):
                 self._cancelled_request_ids.add(self._current_request_id)
             if hasattr(self._service, "cancel_all_requests"):
                 self._service.cancel_all_requests()
+            if self._approval_broker is not None:
+                cancelled_ids = self._approval_broker.cancel_all()
+                for aid in cancelled_ids:
+                    self.approvalCancelled.emit(aid)
 
         drained = self._thread_pool.waitForDone(timeout_ms)
         if not drained:

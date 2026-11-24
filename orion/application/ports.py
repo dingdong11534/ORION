@@ -248,6 +248,16 @@ class ConversationStore(Protocol):
         """
         ...
 
+    def record_activity_event(
+        self,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: str | None,
+        payload: dict[str, Any],
+    ) -> ActivityEvent:
+        """Record an activity event atomically into persistence."""
+        ...
+
 
 class SettingsStore(Protocol):
     """Protocol for persistent JSON key-value application settings.

@@ -804,6 +804,31 @@ class SqliteConversationStore:
 
         return _with_busy_retry(_run)
 
+    def record_activity_event(
+        self,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: str | None,
+        payload: dict[str, Any],
+    ) -> ActivityEvent:
+        """Record an activity event atomically into persistence."""
+
+        def _run() -> ActivityEvent:
+            with self._factory() as session:
+                evt = ActivityEventModel(
+                    id=generate_event_id(),
+                    event_type=event_type,
+                    aggregate_type=aggregate_type,
+                    aggregate_id=aggregate_id,
+                    payload_json=payload,
+                    created_at=utc_now(),
+                )
+                session.add(evt)
+                session.commit()
+                return _evt_to_contract(evt)
+
+        return _with_busy_retry(_run)
+
 
 # ---------------------------------------------------------------------------
 # SqliteSettingsStore

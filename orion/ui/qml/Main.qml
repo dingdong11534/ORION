@@ -32,6 +32,13 @@ ApplicationWindow {
         objectName: "chatModel"
     }
 
+    ListModel {
+        id: pendingApprovalsModel
+        objectName: "pendingApprovalsModel"
+    }
+
+    property int approvalRemainingSeconds: 60
+
     function getActiveTitle() {
         if (!root.activeConversationId)
             return "New Chat"
@@ -136,6 +143,31 @@ ApplicationWindow {
             if (root.activeConversationId === conversationId) {
                 root.activeConversationId = ""
                 chatModel.clear()
+            }
+        }
+
+        function onApprovalRequested(requestDict) {
+            pendingApprovalsModel.append(requestDict)
+            root.approvalRemainingSeconds = 60
+        }
+
+        function onApprovalResolved(approvalId, status) {
+            for (let i = 0; i < pendingApprovalsModel.count; i++) {
+                if (pendingApprovalsModel.get(i).approval_id === approvalId) {
+                    pendingApprovalsModel.remove(i)
+                    root.approvalRemainingSeconds = 60
+                    break
+                }
+            }
+        }
+
+        function onApprovalCancelled(approvalId) {
+            for (let i = 0; i < pendingApprovalsModel.count; i++) {
+                if (pendingApprovalsModel.get(i).approval_id === approvalId) {
+                    pendingApprovalsModel.remove(i)
+                    root.approvalRemainingSeconds = 60
+                    break
+                }
             }
         }
 
@@ -904,6 +936,255 @@ ApplicationWindow {
 
                         contentItem: Text {
                             text: "Delete"
+                            color: "white"
+                            font.pixelSize: 13
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // Tool Execution Approval Modal Dialog
+    // ==========================================
+    Timer {
+        id: approvalTimer
+        interval: 1000
+        repeat: true
+        running: pendingApprovalsModel.count > 0
+        onTriggered: {
+            if (root.approvalRemainingSeconds > 0) {
+                root.approvalRemainingSeconds -= 1
+            }
+        }
+    }
+
+    Rectangle {
+        id: approvalDialog
+        objectName: "approvalDialog"
+        visible: pendingApprovalsModel.count > 0
+        anchors.fill: parent
+        color: "#66000000"
+        z: 1000
+
+        // Consume mouse clicks outside dialog card
+        MouseArea {
+            anchors.fill: parent
+            onClicked: {}
+        }
+
+        readonly property var currentApproval: pendingApprovalsModel.count > 0 ? pendingApprovalsModel.get(0) : null
+        readonly property string currentApprovalId: currentApproval ? currentApproval.approval_id : ""
+        readonly property string currentNonce: currentApproval ? currentApproval.nonce : ""
+        readonly property bool isMutating: currentApproval ? currentApproval.is_mutating : false
+        readonly property bool isExpired: root.approvalRemainingSeconds <= 0
+
+        Rectangle {
+            width: Math.min(parent.width - 40, 520)
+            implicitHeight: approvalContentColumn.implicitHeight + 40
+            radius: 18
+            color: "#FCFBF8"
+            anchors.centerIn: parent
+
+            ColumnLayout {
+                id: approvalContentColumn
+                anchors.fill: parent
+                anchors.margins: 20
+                spacing: 12
+
+                // Header with Title and Mutating Badge
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Text {
+                        text: "Action Approval Required"
+                        font.pixelSize: 17
+                        font.bold: true
+                        color: "#303A32"
+                        textFormat: Text.PlainText
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    // Mutating Badge
+                    Rectangle {
+                        implicitWidth: mutatingLabel.implicitWidth + 12
+                        implicitHeight: 22
+                        radius: 6
+                        color: approvalDialog.isMutating ? "#FBEAE8" : "#EBF3EE"
+                        border.color: approvalDialog.isMutating ? "#D9534F" : "#526D5B"
+                        border.width: 1
+
+                        Text {
+                            id: mutatingLabel
+                            anchors.centerIn: parent
+                            text: approvalDialog.isMutating ? "MUTATING" : "READ-ONLY"
+                            font.pixelSize: 10
+                            font.bold: true
+                            color: approvalDialog.isMutating ? "#D9534F" : "#526D5B"
+                            textFormat: Text.PlainText
+                        }
+                    }
+                }
+
+                // Multiple approvals indicator if count > 1
+                Text {
+                    visible: pendingApprovalsModel.count > 1
+                    Layout.fillWidth: true
+                    text: "Pending approval 1 of " + pendingApprovalsModel.count
+                    font.pixelSize: 11
+                    color: "#88887E"
+                    textFormat: Text.PlainText
+                }
+
+                // Tool Name and Description
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    Text {
+                        id: toolNameText
+                        objectName: "toolNameText"
+                        Layout.fillWidth: true
+                        text: approvalDialog.currentApproval ? approvalDialog.currentApproval.tool_name : ""
+                        font.pixelSize: 14
+                        font.bold: true
+                        color: "#2C342E"
+                        textFormat: Text.PlainText
+                    }
+
+                    Text {
+                        id: actionSummaryText
+                        objectName: "actionSummaryText"
+                        Layout.fillWidth: true
+                        text: approvalDialog.currentApproval ? approvalDialog.currentApproval.action_summary : ""
+                        font.pixelSize: 12
+                        color: "#5B6358"
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                    }
+                }
+
+                // Arguments Preview
+                Text {
+                    text: "Validated Arguments:"
+                    font.pixelSize: 12
+                    font.bold: true
+                    color: "#4A5247"
+                    textFormat: Text.PlainText
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: Math.min(argsText.implicitHeight + 16, 120)
+                    color: "#F4F1E9"
+                    radius: 8
+                    border.color: "#E0DDD3"
+                    border.width: 1
+                    clip: true
+
+                    ScrollView {
+                        anchors.fill: parent
+                        anchors.margins: 8
+
+                        Text {
+                            id: argsText
+                            objectName: "argsText"
+                            width: parent.width
+                            text: approvalDialog.currentApproval ? JSON.stringify(approvalDialog.currentApproval.arguments, null, 2) : "{}"
+                            font.family: "Monospace"
+                            font.pixelSize: 11
+                            color: "#303A32"
+                            wrapMode: Text.WrapAnywhere
+                            textFormat: Text.PlainText
+                        }
+                    }
+                }
+
+                // Expiration Countdown
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Text {
+                        id: countdownLabel
+                        objectName: "countdownLabel"
+                        text: approvalDialog.isExpired ? "Approval expired (60s limit)" : "Expires in " + root.approvalRemainingSeconds + "s"
+                        font.pixelSize: 12
+                        font.bold: approvalDialog.isExpired
+                        color: approvalDialog.isExpired ? "#D9534F" : "#74796E"
+                        textFormat: Text.PlainText
+                    }
+                }
+
+                Item { Layout.fillHeight: true }
+
+                // Actions: Reject and Approve Once
+                RowLayout {
+                    Layout.alignment: Qt.AlignRight
+                    spacing: 10
+
+                    Button {
+                        id: rejectButton
+                        objectName: "approvalRejectButton"
+                        text: "Reject"
+                        implicitWidth: 90
+                        implicitHeight: 36
+                        onClicked: {
+                            if (typeof orion !== "undefined" && orion !== null) {
+                                orion.submitApprovalDecision(
+                                    approvalDialog.currentApprovalId,
+                                    approvalDialog.currentNonce,
+                                    false
+                                )
+                            }
+                        }
+
+                        background: Rectangle {
+                            radius: 9
+                            color: "#EBE8DF"
+                        }
+
+                        contentItem: Text {
+                            text: "Reject"
+                            color: "#4A5247"
+                            font.pixelSize: 13
+                            font.bold: true
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                    }
+
+                    Button {
+                        id: approveButton
+                        objectName: "approvalApproveButton"
+                        text: "Approve Once"
+                        implicitWidth: 120
+                        implicitHeight: 36
+                        enabled: !approvalDialog.isExpired && approvalDialog.currentApprovalId.length > 0
+                        opacity: enabled ? 1.0 : 0.5
+                        onClicked: {
+                            if (typeof orion !== "undefined" && orion !== null) {
+                                orion.submitApprovalDecision(
+                                    approvalDialog.currentApprovalId,
+                                    approvalDialog.currentNonce,
+                                    true
+                                )
+                            }
+                        }
+
+                        background: Rectangle {
+                            radius: 9
+                            color: approveButton.enabled ? "#526D5B" : "#A0A094"
+                        }
+
+                        contentItem: Text {
+                            text: "Approve Once"
                             color: "white"
                             font.pixelSize: 13
                             font.bold: true

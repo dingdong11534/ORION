@@ -1,5 +1,12 @@
 """Typed contracts, ports, and models for ORION's tool execution architecture."""
 
+from orion.application.tools.approvals import (
+    ApprovalBroker,
+    ApprovalDecision,
+    ApprovalRequest,
+    ApprovalResolution,
+    ApprovalStatus,
+)
 from orion.application.tools.contracts import (
     ExecutionStatus,
     ExecutionType,
@@ -41,6 +48,11 @@ from orion.application.tools.workspace_contracts import (
 )
 
 __all__ = [
+    "ApprovalBroker",
+    "ApprovalDecision",
+    "ApprovalRequest",
+    "ApprovalResolution",
+    "ApprovalStatus",
     "DirectoryEntry",
     "ExecutionStatus",
     "ExecutionType",
