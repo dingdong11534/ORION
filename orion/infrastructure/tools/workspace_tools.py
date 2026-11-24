@@ -58,6 +58,74 @@ GIT_HARDENED_GLOBAL_FLAGS: tuple[str, ...] = (
 )
 
 
+def get_configured_filter_overrides(repo_root: Path, safe_env: dict[str, str]) -> list[str]:
+    """Discover all filter and diff driver names in repository config and produce -c overrides.
+
+    Guarantees:
+    - Neutralizes filter.<driver>.clean, filter.<driver>.process, filter.<driver>.smudge
+    - Overrides filter.<driver>.required=false
+    - Neutralizes diff.<driver>.command, diff.<driver>.textconv
+    - Runs purely via read-only git config query without invoking any hooks or filters
+    """
+    overrides: list[str] = []
+    try:
+        res = subprocess.run(
+            ["git", "config", "--get-regexp", r"^(filter|diff)\."],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            env=safe_env,
+            check=False,
+            shell=False,
+        )
+        if res.returncode == 0:
+            filter_drivers: set[str] = set()
+            diff_drivers: set[str] = set()
+            for line in res.stdout.splitlines():
+                parts = line.strip().split()
+                if not parts:
+                    continue
+                key = parts[0]
+                segments = key.split(".")
+                if len(segments) >= 3:
+                    section = segments[0]
+                    driver_name = ".".join(segments[1:-1])
+                    if driver_name:
+                        if section == "filter":
+                            filter_drivers.add(driver_name)
+                        elif section == "diff":
+                            diff_drivers.add(driver_name)
+
+            for d in sorted(filter_drivers):
+                overrides.extend(
+                    [
+                        "-c",
+                        f"filter.{d}.clean=",
+                        "-c",
+                        f"filter.{d}.process=",
+                        "-c",
+                        f"filter.{d}.smudge=",
+                        "-c",
+                        f"filter.{d}.required=false",
+                    ]
+                )
+
+            for d in sorted(diff_drivers):
+                overrides.extend(
+                    [
+                        "-c",
+                        f"diff.{d}.command=",
+                        "-c",
+                        f"diff.{d}.textconv=",
+                    ]
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to query git config for filter overrides: %s", exc)
+
+    return overrides
+
+
 def get_safe_git_env(workspace_root: Path) -> dict[str, str]:
     """Construct an isolated, sanitized environment for read-only Git subprocesses.
 
@@ -378,8 +446,16 @@ class WorkspaceToolsService:
                 summary="The configured workspace root is not a Git repository.",
             )
 
-        cmd = ["git", *GIT_HARDENED_GLOBAL_FLAGS, "status", "--porcelain=v1", "-b"]
         safe_env = get_safe_git_env(self._root)
+        filter_overrides = get_configured_filter_overrides(self._root, safe_env)
+        cmd = [
+            "git",
+            *GIT_HARDENED_GLOBAL_FLAGS,
+            *filter_overrides,
+            "status",
+            "--porcelain=v1",
+            "-b",
+        ]
         try:
             returncode, stdout_str, stderr_str, _ = run_git_command_bounded(
                 cmd,
@@ -458,9 +534,13 @@ class WorkspaceToolsService:
                 f"Git pathspec magic prefix ':' is prohibited: {args.path!r}"
             )
 
+        safe_env = get_safe_git_env(self._root)
+        filter_overrides = get_configured_filter_overrides(self._root, safe_env)
+
         cmd = [
             "git",
             *GIT_HARDENED_GLOBAL_FLAGS,
+            *filter_overrides,
             "diff",
             "--no-ext-diff",
             "--no-textconv",
@@ -476,7 +556,6 @@ class WorkspaceToolsService:
             if rel_path:
                 cmd.extend(["--", rel_path])
 
-        safe_env = get_safe_git_env(self._root)
         try:
             returncode, stdout_str, stderr_str, truncated = run_git_command_bounded(
                 cmd,
@@ -503,6 +582,7 @@ class WorkspaceToolsService:
                 status_cmd = [
                     "git",
                     *GIT_HARDENED_GLOBAL_FLAGS,
+                    *filter_overrides,
                     "status",
                     "--porcelain=v1",
                 ]
