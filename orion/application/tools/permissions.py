@@ -1,0 +1,169 @@
+"""Deterministic permission evaluation engine for ORION tool requests."""
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from orion.application.tools.contracts import (
+    PermissionDecision,
+    PermissionLevel,
+    PermissionOutcome,
+    ToolDefinition,
+    ToolInvocation,
+)
+from orion.application.tools.ports import PermissionEnginePort
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PermissionPolicy:
+    """Security configuration parameters governing tool permission evaluation.
+
+    Default settings embody strict defense-in-depth:
+    - Default-deny for any unspecified capabilities.
+    - System command execution strictly disabled.
+    - Elevated / superuser access strictly forbidden.
+    - Network access disabled.
+    - Mutating workspace operations require human confirmation.
+    - Read-only workspace inspection permitted only within explicitly bounded scope.
+    """
+
+    allow_read_only: bool = True
+    """Whether read-only workspace inspection tools can execute without approval."""
+
+    allow_system_execute: bool = False
+    """Whether system subprocess execution is permitted (always requires approval if True)."""
+
+    require_approval_mutating: bool = True
+    """Whether mutating workspace actions require human approval (if False, denied)."""
+
+    deny_elevated: bool = True
+    """Whether elevated/superuser permissions are denied (must always be True)."""
+
+    deny_network: bool = True
+    """Whether network-accessing tools are denied."""
+
+    allowed_tool_ids: frozenset[str] | None = None
+    """Optional explicit allowlist of tool IDs. If specified, any tool not in this set is denied."""
+
+    workspace_root: Path | None = None
+    """Authorized base directory for filesystem tool scope validation."""
+
+    prohibited_path_fragments: tuple[str, ...] = field(
+        default_factory=lambda: (
+            "/etc",
+            "/proc",
+            "/sys",
+            "/dev",
+            ".ssh",
+            ".bashrc",
+            ".profile",
+            ".gnupg",
+        )
+    )
+
+
+class PermissionEngine(PermissionEnginePort):
+    """Deterministic security policy engine for tool execution.
+
+    CRITICAL SECURITY PRINCIPLE:
+    This engine relies strictly on deterministic code and configured policies.
+    The LLM has ZERO influence over permission evaluation.
+    Absence of an explicit permit rule results in immediate denial.
+    """
+
+    def __init__(self, policy: PermissionPolicy | None = None) -> None:
+        self._policy = policy if policy is not None else PermissionPolicy()
+
+    @property
+    def policy(self) -> PermissionPolicy:
+        """Return the active immutable permission policy."""
+        return self._policy
+
+    def evaluate(self, tool: ToolDefinition, invocation: ToolInvocation) -> PermissionDecision:
+        """Deterministically evaluate whether a tool invocation is allowed, denied, or requires approval."""
+        tool_id = tool.tool_id
+
+        # 1. Hard deny: Elevated / root permissions are never allowed
+        if (
+            tool.permission_level == PermissionLevel.ELEVATED
+            or self._policy.deny_elevated
+            and tool.permission_level == PermissionLevel.ELEVATED
+        ):
+            return PermissionDecision(
+                outcome=PermissionOutcome.DENY,
+                reason="Elevated (superuser) privileges are strictly prohibited.",
+                tool_id=tool_id,
+            )
+
+        # 2. Explicit tool allowlist check (if configured)
+        if (
+            self._policy.allowed_tool_ids is not None
+            and tool_id not in self._policy.allowed_tool_ids
+        ):
+            return PermissionDecision(
+                outcome=PermissionOutcome.DENY,
+                reason=f"Tool '{tool_id}' is not in the explicit allowlist.",
+                tool_id=tool_id,
+            )
+
+        # 3. Path argument check for sensitive system locations (if paths present in arguments)
+        for arg_key, arg_val in invocation.arguments.items():
+            if isinstance(arg_val, str) and any(
+                frag in arg_val for frag in self._policy.prohibited_path_fragments
+            ):
+                return PermissionDecision(
+                    outcome=PermissionOutcome.DENY,
+                    reason=f"Argument '{arg_key}' references prohibited sensitive system path fragment.",
+                    tool_id=tool_id,
+                )
+
+        # 4. System execution policy
+        if tool.permission_level == PermissionLevel.SYSTEM_EXECUTE:
+            if not self._policy.allow_system_execute:
+                return PermissionDecision(
+                    outcome=PermissionOutcome.DENY,
+                    reason="System command execution is disabled by policy in this environment.",
+                    tool_id=tool_id,
+                )
+            return PermissionDecision(
+                outcome=PermissionOutcome.REQUIRE_APPROVAL,
+                reason="System command execution requires explicit user confirmation.",
+                tool_id=tool_id,
+            )
+
+        # 5. Mutating operations (workspace_write or is_mutating flag)
+        if tool.is_mutating or tool.permission_level == PermissionLevel.WORKSPACE_WRITE:
+            if not self._policy.require_approval_mutating:
+                return PermissionDecision(
+                    outcome=PermissionOutcome.DENY,
+                    reason="Mutating operations are disabled by policy.",
+                    tool_id=tool_id,
+                )
+            return PermissionDecision(
+                outcome=PermissionOutcome.REQUIRE_APPROVAL,
+                reason="Mutating workspace operation requires explicit human approval.",
+                tool_id=tool_id,
+            )
+
+        # 6. Read-only workspace inspection
+        if tool.permission_level == PermissionLevel.READ_ONLY and not tool.is_mutating:
+            if self._policy.allow_read_only:
+                return PermissionDecision(
+                    outcome=PermissionOutcome.ALLOW,
+                    reason="Read-only workspace inspection permitted by policy.",
+                    tool_id=tool_id,
+                )
+            return PermissionDecision(
+                outcome=PermissionOutcome.REQUIRE_APPROVAL,
+                reason="Read-only workspace inspection requires approval under current policy.",
+                tool_id=tool_id,
+            )
+
+        # 7. Fallthrough: Default-deny for any unhandled combination
+        return PermissionDecision(
+            outcome=PermissionOutcome.DENY,
+            reason="Action matches no permissive policy rule; default-deny enforced.",
+            tool_id=tool_id,
+        )
