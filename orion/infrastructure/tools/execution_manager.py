@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # Constants and Policy Bounds
 # ---------------------------------------------------------------------------
 
-DEFAULT_ALLOWLISTED_COMMANDS: frozenset[str] = frozenset({"pytest", "ruff", "git", "printf"})
+DEFAULT_ALLOWLISTED_COMMANDS: frozenset[str] = frozenset({"pytest", "ruff", "git"})
 
 ALLOWED_GIT_SUBCOMMANDS: frozenset[str] = frozenset(
     {

@@ -57,9 +57,12 @@ class OrionBridge(QObject):
 
     responseReady = Signal(str)
     responseChunk = Signal(str, str)
+    thinkingChunk = Signal(str, str)
     responseInterrupted = Signal(str, str)
     errorOccurred = Signal(str)
     busyChanged = Signal(bool)
+    showThinkingChanged = Signal(bool)
+    thinkingSupportedChanged = Signal(bool)
 
     conversationsLoaded = Signal(list, str)
     activeConversationChanged = Signal(str)
@@ -121,6 +124,29 @@ class OrionBridge(QObject):
         """Expose current active conversation ID to QML property bindings."""
         return self._service.active_conversation_id or ""
 
+    @Property(bool, notify=showThinkingChanged)
+    def showThinking(self) -> bool:
+        """Expose persistent Show thinking trace preference to QML."""
+        if hasattr(self._service, "get_show_thinking"):
+            return bool(self._service.get_show_thinking())
+        return False
+
+    @Property(bool, notify=thinkingSupportedChanged)
+    def thinkingSupported(self) -> bool:
+        """Expose whether the active model supports thinking traces."""
+        if hasattr(self._service, "supports_thinking"):
+            return bool(self._service.supports_thinking())
+        return False
+
+    @Slot(bool)
+    def setShowThinking(self, enabled: bool) -> None:
+        """Persist the Show thinking trace preference."""
+        if self._is_shutting_down:
+            return
+        if hasattr(self._service, "set_show_thinking"):
+            new_val = bool(self._service.set_show_thinking(enabled))
+            self.showThinkingChanged.emit(new_val)
+
     def _set_busy(self, busy: bool) -> None:
         if self._is_busy != busy:
             self._is_busy = busy
@@ -147,6 +173,7 @@ class OrionBridge(QObject):
         self._set_busy(True)
 
         worker.signals.chunk.connect(self._handle_worker_chunk)
+        worker.signals.thinking.connect(self._handle_worker_thinking)
         worker.signals.result.connect(lambda res, tid=task_id: self._handle_worker_result(tid, res))
         worker.signals.error.connect(lambda err, tid=task_id: self._handle_worker_error(tid, err))
         worker.signals.finished.connect(lambda tid=task_id: self._handle_worker_finished(tid))
@@ -381,6 +408,7 @@ class OrionBridge(QObject):
                     trimmed,
                     client_request_id=request_id,
                     conversation_id=target_cid,
+                    on_thinking=lambda t: signals.thinking.emit(request_id, t),
                 ):
                     accumulated.append(chunk)
                     signals.chunk.emit(request_id, chunk)
@@ -406,6 +434,16 @@ class OrionBridge(QObject):
         if task_id in self._cancelled_request_ids:
             return
         self.responseChunk.emit(chunk, task_id)
+
+    @Slot(str, str)
+    def _handle_worker_thinking(self, task_id: str, chunk: str) -> None:
+        if self._is_shutting_down:
+            return
+        if task_id not in self._active_workers:
+            return
+        if task_id in self._cancelled_request_ids:
+            return
+        self.thinkingChunk.emit(chunk, task_id)
 
     @Slot(str, object)
     def _handle_worker_result(self, task_id: str, result: object) -> None:

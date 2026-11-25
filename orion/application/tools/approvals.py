@@ -27,6 +27,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from orion.application.tools.contracts import (
+    PermissionLevel,
     ToolDefinition,
     ToolInvocation,
     utc_now,
@@ -241,6 +242,16 @@ class ApprovalBroker:
             nonce = secrets.token_hex(16)
             inv_hash = _canonical_invocation_hash(invocation)
 
+            if tool.permission_level == PermissionLevel.CODE_EXECUTION:
+                cwd_display = str(invocation.arguments.get("cwd") or "workspace root")
+                action_summary = (
+                    f"Executes project-controlled Python code (`pytest`) inside workspace [{cwd_display}]. "
+                    "Test modules, conftest.py and imported modules can execute arbitrary Python within "
+                    "the stated execution environment."
+                )
+            else:
+                action_summary = f"{tool.name}: {tool.description}"
+
             request = ApprovalRequest(
                 approval_id=approval_id,
                 nonce=nonce,
@@ -251,7 +262,7 @@ class ApprovalBroker:
                 tool_name=tool.name,
                 tool_description=tool.description,
                 arguments=copy.deepcopy(invocation.arguments),
-                action_summary=f"{tool.name}: {tool.description}",
+                action_summary=action_summary,
                 is_mutating=tool.is_mutating,
                 created_at=now_wall,
                 expires_at=now_wall + timedelta(seconds=self._ttl_seconds),

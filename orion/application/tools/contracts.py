@@ -44,8 +44,15 @@ class PermissionLevel(StrEnum):
     SYSTEM_EXECUTE = "system_execute"
     """Executes external binaries, shell utilities, or subprocesses."""
 
+    CODE_EXECUTION = "code_execution"
+    """Executes workspace-controlled code (e.g., pytest); always requires explicit human approval."""
+
     ELEVATED = "elevated"
     """Requires superuser, administrative, or setuid access (strictly forbidden)."""
+
+
+MODEL_EXPOSABLE_CAPABILITIES: frozenset[PermissionLevel] = frozenset({PermissionLevel.READ_ONLY})
+"""Explicit capability allowlist for tools that may ever be exposed to model proposals."""
 
 
 class ExecutionType(StrEnum):
@@ -123,6 +130,7 @@ class ToolDefinition(BaseModel):
     permission_level: PermissionLevel
     execution_type: ExecutionType
     is_mutating: bool
+    model_exposable: bool = False
     timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
     input_model: type[BaseModel]
     output_model: type[BaseModel]

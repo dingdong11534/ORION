@@ -39,6 +39,8 @@ from orion.infrastructure.tools.path_resolver import (
     DEFAULT_EXCLUDED_DIRS,
     WorkspacePathResolver,
     WorkspaceSecurityError,
+    is_sensitive_filename,
+    is_sensitive_relative_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -248,6 +250,25 @@ def _is_binary(chunk: bytes) -> bool:
     return b"\x00" in chunk
 
 
+def _filter_sensitive_git_diff(diff_text: str) -> str:
+    """Strip diff sections whose a/ or b/ file path matches a sensitive filename."""
+    if not diff_text:
+        return diff_text
+    kept: list[str] = []
+    for section in diff_text.split("diff --git "):
+        if not section:
+            continue
+        first_line = section.splitlines()[0] if section else ""
+        # Header format: "a/<path> b/<path>"
+        parts = first_line.split(" b/", 1)
+        a_path = parts[0].removeprefix("a/")
+        b_path = parts[1] if len(parts) > 1 else ""
+        if is_sensitive_relative_path(a_path) or is_sensitive_relative_path(b_path):
+            continue
+        kept.append("diff --git " + section)
+    return "".join(kept)
+
+
 class WorkspaceToolsService:
     """Concrete business logic for read-only workspace inspection tools."""
 
@@ -287,6 +308,10 @@ class WorkspaceToolsService:
 
         total_count = 0
         for entry in scanned_entries:
+            # Never expose sensitive filenames/directories in listings
+            if is_sensitive_filename(entry.name):
+                continue
+
             # Check exclusions
             is_excluded = entry.name in DEFAULT_EXCLUDED_DIRS
 
@@ -380,12 +405,16 @@ class WorkspaceToolsService:
             dirnames[:] = [
                 d
                 for d in dirnames
-                if d not in DEFAULT_EXCLUDED_DIRS and not (Path(dirpath) / d).is_symlink()
+                if d not in DEFAULT_EXCLUDED_DIRS
+                and not is_sensitive_filename(d)
+                and not (Path(dirpath) / d).is_symlink()
             ]
             dirnames.sort()
             filenames.sort()
 
             for fname in filenames:
+                if is_sensitive_filename(fname):
+                    continue
                 if files_inspected >= max_files_to_inspect:
                     truncated = True
                     break
@@ -496,11 +525,15 @@ class WorkspaceToolsService:
             if line.startswith("## "):
                 branch = line[3:].strip()
             elif line.startswith("?? "):
-                untracked.append(line[3:].strip())
+                path_str = line[3:].strip()
+                if not is_sensitive_relative_path(path_str):
+                    untracked.append(path_str)
             elif len(line) >= 2:
                 index_status = line[0]
                 worktree_status = line[1]
                 path_str = line[3:].strip()
+                if is_sensitive_relative_path(path_str):
+                    continue
                 if index_status not in (" ", "?"):
                     staged.append(f"{index_status}: {path_str}")
                 if worktree_status not in (" ", "?"):
@@ -581,7 +614,7 @@ class WorkspaceToolsService:
         if returncode != 0 and stderr_str:
             diff_text = f"Git diff error ({returncode}): {stderr_str.strip()}\n{stdout_str}"
         else:
-            diff_text = stdout_str
+            diff_text = _filter_sensitive_git_diff(stdout_str)
 
         # Collect untracked files if unstaged diff was requested
         untracked: list[str] = []
@@ -604,7 +637,9 @@ class WorkspaceToolsService:
                 if st_code == 0:
                     for line in st_out.splitlines():
                         if line.startswith("?? "):
-                            untracked.append(line[3:].strip())
+                            upath = line[3:].strip()
+                            if not is_sensitive_relative_path(upath):
+                                untracked.append(upath)
             except Exception:  # noqa: BLE001, S110
                 pass
 
@@ -700,6 +735,7 @@ def create_workspace_tool_definitions() -> list[ToolDefinition]:
             permission_level=PermissionLevel.READ_ONLY,
             execution_type=ExecutionType.IN_PROCESS,
             is_mutating=False,
+            model_exposable=True,
             timeout_seconds=10.0,
             input_model=WorkspaceListDirectoryInput,
             output_model=WorkspaceListDirectoryOutput,
@@ -712,6 +748,7 @@ def create_workspace_tool_definitions() -> list[ToolDefinition]:
             permission_level=PermissionLevel.READ_ONLY,
             execution_type=ExecutionType.IN_PROCESS,
             is_mutating=False,
+            model_exposable=True,
             timeout_seconds=10.0,
             input_model=WorkspaceReadFileInput,
             output_model=WorkspaceReadFileOutput,

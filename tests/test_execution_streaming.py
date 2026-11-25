@@ -12,6 +12,7 @@ import pytest
 
 from orion.application.tools.contracts import ExecutionStatus
 from orion.infrastructure.tools.execution_manager import (
+    DEFAULT_ALLOWLISTED_COMMANDS,
     ExecutionManager,
     OutputBatcher,
 )
@@ -30,7 +31,9 @@ def temp_workspace(tmp_path: Path):
 
 @pytest.fixture
 def manager(temp_workspace: Path):
-    return ExecutionManager(workspace_root=temp_workspace)
+    return ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=temp_workspace
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +162,11 @@ def test_live_stdout_delivered_incrementally(temp_workspace: Path):
         received_chunks.append((eid, stream, text))
         chunk_event.set()
 
-    mgr = ExecutionManager(workspace_root=temp_workspace, output_listener=listener)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
+        workspace_root=temp_workspace,
+        output_listener=listener,
+    )
 
     result = mgr.run_command(
         command="printf",
@@ -183,7 +190,11 @@ def test_live_output_carries_correct_execution_id(temp_workspace: Path):
     def listener(eid: str, stream: str, text: str) -> None:
         received.append((eid, stream, text))
 
-    mgr = ExecutionManager(workspace_root=temp_workspace, output_listener=listener)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
+        workspace_root=temp_workspace,
+        output_listener=listener,
+    )
     result = mgr.run_command(
         command="printf",
         args=["check-id"],
@@ -202,7 +213,9 @@ def test_live_listener_set_after_construction(temp_workspace: Path):
     def listener(eid: str, stream: str, text: str) -> None:
         received.append(text)
 
-    mgr = ExecutionManager(workspace_root=temp_workspace)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=temp_workspace
+    )
     mgr.set_output_listener(listener)
 
     result = mgr.run_command(command="printf", args=["post-set"])
@@ -221,6 +234,7 @@ def test_output_buffer_limit_respected(temp_workspace: Path):
         received.append(text)
 
     mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
         workspace_root=temp_workspace,
         max_output_bytes=200,  # Very small limit
         output_listener=listener,
@@ -242,14 +256,18 @@ def test_output_buffer_limit_respected(temp_workspace: Path):
 
 def test_cancel_nonexistent_execution_returns_false(temp_workspace: Path):
     """cancel() returns False when no active execution matches the given ID."""
-    mgr = ExecutionManager(workspace_root=temp_workspace)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=temp_workspace
+    )
     result = mgr.cancel("no-such-id")
     assert result is False
 
 
 def test_cancel_already_completed_returns_false(temp_workspace: Path):
     """cancel() after completion must return False."""
-    mgr = ExecutionManager(workspace_root=temp_workspace)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=temp_workspace
+    )
     out = mgr.run_command(command="printf", args=["done"])
     assert out.status == ExecutionStatus.COMPLETED
     result = mgr.cancel(out.execution_id)
@@ -285,6 +303,7 @@ def test_cancel_active_execution_produces_cancelled_status(
         audit_events.append((etype, agg_type, agg_id, payload))
 
     mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
         workspace_root=temp_workspace,
         output_listener=output_listener,
         event_recorder=event_recorder,
@@ -338,6 +357,7 @@ def test_timeout_during_output_streaming(temp_workspace: Path, monkeypatch: pyte
 
     received: list[tuple[str, str, str]] = []
     mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
         workspace_root=temp_workspace,
         output_listener=lambda eid, s, t: received.append((eid, s, t)),
     )
@@ -365,6 +385,7 @@ def test_shutdown_cancels_active_execution(temp_workspace: Path, monkeypatch: py
 
     started_event = threading.Event()
     mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
         workspace_root=temp_workspace,
         lifecycle_listener=lambda eid, evt, payload: (
             started_event.set() if evt == "started" else None
@@ -402,6 +423,7 @@ def test_cancel_during_execution_in_thread(temp_workspace: Path):
 
     lifecycle_events: list[tuple[str, str]] = []
     mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
         workspace_root=temp_workspace,
         lifecycle_listener=lambda eid, event, payload: lifecycle_events.append((eid, event)),
     )
@@ -423,7 +445,11 @@ def test_lifecycle_started_event_received(temp_workspace: Path):
     def listener(eid: str, event: str, payload: dict) -> None:
         events.append((eid, event, payload))
 
-    mgr = ExecutionManager(workspace_root=temp_workspace, lifecycle_listener=listener)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
+        workspace_root=temp_workspace,
+        lifecycle_listener=listener,
+    )
     mgr.run_command(command="printf", args=["hello"], execution_id="lc-test")
 
     started_events = [e for e in events if e[1] == "started"]
@@ -440,7 +466,11 @@ def test_lifecycle_completed_event_received(temp_workspace: Path):
     def listener(eid: str, event: str, payload: dict) -> None:
         events.append((eid, event, payload))
 
-    mgr = ExecutionManager(workspace_root=temp_workspace, lifecycle_listener=listener)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
+        workspace_root=temp_workspace,
+        lifecycle_listener=listener,
+    )
     result = mgr.run_command(command="printf", args=["finish"], execution_id="lc-complete")
 
     assert result.status == ExecutionStatus.COMPLETED
@@ -456,7 +486,11 @@ def test_lifecycle_failed_event_received(temp_workspace: Path):
     def listener(eid: str, event: str, payload: dict) -> None:
         events.append((eid, event, payload))
 
-    mgr = ExecutionManager(workspace_root=temp_workspace, lifecycle_listener=listener)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
+        workspace_root=temp_workspace,
+        lifecycle_listener=listener,
+    )
     mgr.run_command(command="git", args=["status"], execution_id="lc-fail")
     terminal_events = [e for e in events if e[1] in ("completed", "failed")]
     assert len(terminal_events) >= 1
@@ -469,7 +503,9 @@ def test_set_lifecycle_listener_after_construction(temp_workspace: Path):
     def listener(eid: str, event: str, payload: dict) -> None:
         events.append(event)
 
-    mgr = ExecutionManager(workspace_root=temp_workspace)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=temp_workspace
+    )
     mgr.set_lifecycle_listener(listener)
 
     mgr.run_command(command="printf", args=["test"])
@@ -485,7 +521,9 @@ def test_shutdown_rejects_new_executions(temp_workspace: Path):
     """After shutdown(), new execute() calls must raise ExecutionError."""
     from orion.infrastructure.tools.execution_manager import ExecutionError, ExecutionRequest
 
-    mgr = ExecutionManager(workspace_root=temp_workspace)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=temp_workspace
+    )
     mgr.shutdown(wait=True)
 
     req = ExecutionRequest(
@@ -499,7 +537,9 @@ def test_shutdown_rejects_new_executions(temp_workspace: Path):
 
 def test_shutdown_during_idle_completes_cleanly(temp_workspace: Path):
     """Calling shutdown on an idle manager should complete immediately."""
-    mgr = ExecutionManager(workspace_root=temp_workspace)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=temp_workspace
+    )
     mgr.shutdown(wait=True, timeout=1.0)
     # No exception means success
 
@@ -513,21 +553,25 @@ def test_bridge_emits_execution_signals_and_cancels(
     temp_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """OrionBridge must emit executionStarted, executionOutputChunk, executionFinished and support cancelExecution."""
+    import os
     import sys
     from unittest.mock import MagicMock
 
-    from PySide6.QtCore import QCoreApplication
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QGuiApplication
 
     import orion.infrastructure.tools.execution_manager as em_mod
     from orion.ui.qt_bridge import OrionBridge
 
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QGuiApplication.instance() or QGuiApplication([])
     monkeypatch.setattr(em_mod, "resolve_executable", lambda cmd, allowed: Path(sys.executable))
     monkeypatch.setattr(em_mod, "validate_command_arguments", lambda *a, **kw: None)
 
     mock_service = MagicMock()
     mock_service.active_conversation_id = "conv-1"
-    mgr = ExecutionManager(workspace_root=temp_workspace)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=temp_workspace
+    )
     bridge = OrionBridge(assistant_service=mock_service, execution_manager=mgr)
 
     started_calls: list[tuple] = []

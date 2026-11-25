@@ -72,7 +72,10 @@ def temp_workspace(tmp_path: Path):
 
 @pytest.fixture
 def manager(temp_workspace: Path):
-    return ExecutionManager(workspace_root=temp_workspace)
+    return ExecutionManager(
+        workspace_root=temp_workspace,
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
+    )
 
 
 @pytest.fixture
@@ -82,7 +85,11 @@ def secured_execution_system(temp_workspace: Path):
     def event_recorder(event_type: str, agg_type: str, agg_id: str | None, payload: dict):
         events.append((event_type, agg_type, agg_id, payload))
 
-    manager = ExecutionManager(workspace_root=temp_workspace, event_recorder=event_recorder)
+    manager = ExecutionManager(
+        workspace_root=temp_workspace,
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
+        event_recorder=event_recorder,
+    )
     executor = SubprocessExecutor(execution_manager=manager, event_recorder=event_recorder)
 
     registry = ToolRegistry()

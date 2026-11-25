@@ -3,8 +3,9 @@
 import logging
 import threading
 from collections.abc import Sequence
+from typing import Any
 
-from orion.application.tools.contracts import ToolDefinition
+from orion.application.tools.contracts import MODEL_EXPOSABLE_CAPABILITIES, ToolDefinition
 from orion.application.tools.ports import (
     ToolNotFoundError,
     ToolRegistrationError,
@@ -89,6 +90,55 @@ class ToolRegistry(ToolRegistryPort):
         """Return all registered tool definitions ordered lexicographically by tool_id."""
         with self._lock:
             return sorted(self._tools.values(), key=lambda t: t.tool_id)
+
+    def list_model_eligible_tools(self) -> Sequence[ToolDefinition]:
+        """Return tools eligible for model-exposed catalog via explicit capability allowlist."""
+        with self._lock:
+            return sorted(
+                (
+                    t
+                    for t in self._tools.values()
+                    if t.model_exposable
+                    and not t.is_mutating
+                    and t.permission_level in MODEL_EXPOSABLE_CAPABILITIES
+                ),
+                key=lambda t: t.tool_id,
+            )
+
+    def build_model_decision_schema(self) -> dict[str, Any]:
+        """Generate strict JSON Schema for model tool-decision proposals from eligible Pydantic models."""
+        eligible = self.list_model_eligible_tools()
+        tool_ids: list[str | None] = [t.tool_id for t in eligible]
+        tool_ids.append(None)
+
+        arg_schemas: list[dict[str, Any]] = []
+        for t in eligible:
+            raw_schema = t.input_model.model_json_schema()
+            # Ensure nested schema is strictly closed (additionalProperties: false)
+            clean_props = {}
+            for prop_name, prop_def in raw_schema.get("properties", {}).items():
+                clean_props[prop_name] = {k: v for k, v in prop_def.items() if k != "default"}
+            arg_schemas.append(
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": clean_props,
+                    "required": list(raw_schema.get("required", [])),
+                }
+            )
+        arg_schemas.append({"type": "null"})
+
+        return {
+            "type": "object",
+            "required": ["action", "tool", "arguments", "response"],
+            "additionalProperties": False,
+            "properties": {
+                "action": {"type": "string", "enum": ["respond", "propose_tool"]},
+                "tool": {"type": ["string", "null"], "enum": tool_ids},
+                "arguments": {"anyOf": arg_schemas},
+                "response": {"type": ["string", "null"]},
+            },
+        }
 
     def __len__(self) -> int:
         with self._lock:

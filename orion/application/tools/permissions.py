@@ -35,6 +35,9 @@ class PermissionPolicy:
     allow_system_execute: bool = False
     """Whether system subprocess execution is permitted (always requires approval if True)."""
 
+    allow_code_execution: bool = False
+    """Whether workspace-controlled code execution (e.g., pytest) is permitted (always requires approval if True)."""
+
     require_approval_mutating: bool = True
     """Whether mutating workspace actions require human approval (if False, denied)."""
 
@@ -156,7 +159,21 @@ class PermissionEngine(PermissionEnginePort):
                             tool_id=tool_id,
                         )
 
-        # 4. System execution policy
+        # 4. Code execution policy (distinct from READ_ONLY, WORKSPACE_WRITE, and SYSTEM_EXECUTE)
+        if tool.permission_level == PermissionLevel.CODE_EXECUTION:
+            if not self._policy.allow_code_execution:
+                return PermissionDecision(
+                    outcome=PermissionOutcome.DENY,
+                    reason="Project-controlled code execution (CODE_EXECUTION) is disabled by policy.",
+                    tool_id=tool_id,
+                )
+            return PermissionDecision(
+                outcome=PermissionOutcome.REQUIRE_APPROVAL,
+                reason="Project-controlled code execution requires explicit human approval.",
+                tool_id=tool_id,
+            )
+
+        # 5. System execution policy
         if tool.permission_level == PermissionLevel.SYSTEM_EXECUTE:
             if not self._policy.allow_system_execute:
                 return PermissionDecision(

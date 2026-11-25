@@ -18,7 +18,11 @@ import pytest
 
 import orion.infrastructure.tools.execution_manager as em_mod
 from orion.application.tools.contracts import ExecutionStatus
-from orion.infrastructure.tools.execution_manager import ExecutionManager, OutputBatcher
+from orion.infrastructure.tools.execution_manager import (
+    DEFAULT_ALLOWLISTED_COMMANDS,
+    ExecutionManager,
+    OutputBatcher,
+)
 
 
 @pytest.fixture
@@ -41,7 +45,9 @@ def test_detached_setsid_descendant_does_not_hang_execution_or_shutdown(
     monkeypatch.setattr(em_mod, "validate_command_arguments", lambda *a, **kw: None)
 
     detached_pid_file = ws / "detached.pid"
-    mgr = ExecutionManager(workspace_root=ws)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=ws
+    )
 
     # Parent spawns a detached child (os.setsid(), inheriting stdout/stderr) and exits immediately.
     script = (
@@ -97,7 +103,9 @@ def test_sequential_executions_and_cancellations_leave_zero_stale_state(
     monkeypatch.setattr(em_mod, "resolve_executable", lambda cmd, allowed: Path(sys.executable))
     monkeypatch.setattr(em_mod, "validate_command_arguments", lambda *a, **kw: None)
 
-    mgr = ExecutionManager(workspace_root=ws)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=ws
+    )
 
     # 10 normal completions
     for i in range(10):
@@ -161,7 +169,9 @@ def test_timeout_racing_with_cancellation_stays_consistent(
     monkeypatch.setattr(em_mod, "resolve_executable", lambda cmd, allowed: Path(sys.executable))
     monkeypatch.setattr(em_mod, "validate_command_arguments", lambda *a, **kw: None)
 
-    mgr = ExecutionManager(workspace_root=ws)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=ws
+    )
     holder: list = []
     t = threading.Thread(
         target=lambda: holder.append(

@@ -245,3 +245,44 @@ class ActivityEvent(BaseModel):
     @classmethod
     def validate_timezone_aware(cls, value: datetime) -> datetime:
         return _require_timezone_aware(value)
+
+
+class ThinkingDelta(BaseModel):
+    """Incremental reasoning/thinking chunk emitted separately from assistant answer text."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["thinking_delta"] = "thinking_delta"
+    text: str
+
+
+class TextDelta(BaseModel):
+    """Incremental assistant final-answer text chunk."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["text_delta"] = "text_delta"
+    text: str
+
+
+class GenerationCompleted(BaseModel):
+    """Terminal event emitted when model generation completes successfully."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["generation_completed"] = "generation_completed"
+    stop_reason: str = "stop"
+    final_text: str = ""
+
+
+class GenerationFailed(BaseModel):
+    """Terminal event emitted when model generation fails."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: Literal["generation_failed"] = "generation_failed"
+    error: str
+    retryable: bool = False
+
+
+GenerationEvent = ThinkingDelta | TextDelta | GenerationCompleted | GenerationFailed

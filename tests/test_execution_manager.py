@@ -31,7 +31,10 @@ def temp_workspace(tmp_path: Path):
 
 @pytest.fixture
 def manager(temp_workspace: Path):
-    return ExecutionManager(workspace_root=temp_workspace)
+    return ExecutionManager(
+        workspace_root=temp_workspace,
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -40,8 +43,12 @@ def manager(temp_workspace: Path):
 
 
 def test_resolve_allowlisted_command():
-    """Allowlisted command like printf or git resolves to an existing executable binary."""
-    path = resolve_executable("printf", DEFAULT_ALLOWLISTED_COMMANDS)
+    """Allowlisted command like git or test-injected printf resolves to an existing executable binary."""
+    assert "printf" not in DEFAULT_ALLOWLISTED_COMMANDS
+    with pytest.raises(DisallowedCommandError, match="not in the executable allowlist"):
+        resolve_executable("printf", DEFAULT_ALLOWLISTED_COMMANDS)
+
+    path = resolve_executable("printf", DEFAULT_ALLOWLISTED_COMMANDS | {"printf"})
     assert path.is_file()
     assert os.access(path, os.X_OK)
 

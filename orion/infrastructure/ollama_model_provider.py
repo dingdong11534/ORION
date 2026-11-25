@@ -9,7 +9,14 @@ import urllib.request
 from collections.abc import Iterator, Sequence
 from typing import Any
 
-from orion.application.contracts import CancellationToken, ChatMessage
+from orion.application.contracts import (
+    CancellationToken,
+    ChatMessage,
+    GenerationCompleted,
+    GenerationEvent,
+    TextDelta,
+    ThinkingDelta,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +75,30 @@ class OllamaModelProvider:
         self.num_ctx = num_ctx
         self.num_predict = num_predict
         self.think = think
+        self._supports_thinking_cache: bool | None = None
+
+    def supports_thinking(self) -> bool:
+        """Query Ollama /api/show to check whether the configured model supports thinking."""
+        if self._supports_thinking_cache is not None:
+            return self._supports_thinking_cache
+        endpoint = f"{self.base_url}/api/show"
+        payload = json.dumps({"model": self.model_name}).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=min(self.timeout, 10.0)) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            caps = data.get("capabilities") if isinstance(data, dict) else None
+            supported = isinstance(caps, list) and "thinking" in caps
+            self._supports_thinking_cache = supported
+            return supported
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Thinking capability detection failed for %s: %s", self.model_name, exc)
+            return False
 
     def _handle_http_error(self, exc: urllib.error.HTTPError) -> None:
         err_body = ""
@@ -255,9 +286,29 @@ class OllamaModelProvider:
         history: Sequence[ChatMessage] | None = None,
         cancellation_token: CancellationToken | None = None,
     ) -> Iterator[str]:
-        """Stream response chunks incrementally for the given prompt and conversation history."""
+        """Stream response text chunks incrementally for the given prompt and history."""
+        for event in self.stream_events(
+            prompt=prompt,
+            history=history,
+            cancellation_token=cancellation_token,
+            think=self.think,
+        ):
+            if isinstance(event, TextDelta):
+                yield event.text
+
+    def stream_events(
+        self,
+        prompt: str,
+        history: Sequence[ChatMessage] | None = None,
+        cancellation_token: CancellationToken | None = None,
+        think: bool | None = None,
+    ) -> Iterator[GenerationEvent]:
+        """Stream provider-neutral ThinkingDelta, TextDelta, and GenerationCompleted events."""
         if cancellation_token and cancellation_token.is_cancelled:
             raise OllamaCancelledError("Generation was cancelled before starting.")
+
+        effective_think = bool(self.think if think is None else think)
+        effective_num_predict = max(self.num_predict, 1024) if effective_think else self.num_predict
 
         messages: list[dict[str, str]] = []
 
@@ -281,11 +332,11 @@ class OllamaModelProvider:
             "model": self.model_name,
             "messages": messages,
             "stream": True,
-            "think": self.think,
+            "think": effective_think,
             "keep_alive": "30s",
             "options": {
                 "num_ctx": self.num_ctx,
-                "num_predict": self.num_predict,
+                "num_predict": effective_num_predict,
             },
         }
 
@@ -334,6 +385,8 @@ class OllamaModelProvider:
         has_yielded = False
         has_non_empty = False
         done_received = False
+        done_reason = "stop"
+        content_parts: list[str] = []
 
         try:
             with resp:
@@ -379,15 +432,20 @@ class OllamaModelProvider:
                     if message_obj is not None:
                         if not isinstance(message_obj, dict):
                             raise OllamaResponseError("Ollama API chunk missing 'message' object.")
+                        thinking_chunk = message_obj.get("thinking")
+                        if effective_think and thinking_chunk and isinstance(thinking_chunk, str):
+                            yield ThinkingDelta(text=thinking_chunk)
                         chunk_content = message_obj.get("content")
                         if chunk_content and isinstance(chunk_content, str):
                             has_yielded = True
                             if chunk_content.strip():
                                 has_non_empty = True
-                            yield chunk_content
+                            content_parts.append(chunk_content)
+                            yield TextDelta(text=chunk_content)
 
                     if record.get("done") is True:
                         done_received = True
+                        done_reason = str(record.get("done_reason") or "stop")
                         break
 
             if cancellation_token and cancellation_token.is_cancelled:
@@ -402,6 +460,10 @@ class OllamaModelProvider:
                     f"Ollama model {self.model_name!r} returned an empty streamed response. "
                     "The model may have produced only whitespace or reasoning."
                 )
+            yield GenerationCompleted(
+                stop_reason=done_reason,
+                final_text="".join(content_parts),
+            )
         except OllamaCancelledError:
             raise
         except urllib.error.HTTPError as exc:

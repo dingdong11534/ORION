@@ -23,6 +23,7 @@ from orion.application.tools.permissions import PermissionEngine, PermissionPoli
 from orion.application.tools.registry import ToolRegistry
 from orion.application.tools.router import RouterDisposition, ToolRouter
 from orion.infrastructure.tools.execution_manager import (
+    DEFAULT_ALLOWLISTED_COMMANDS,
     MAX_OUTPUT_BYTES,
     ExecutionError,
     ExecutionManager,
@@ -72,7 +73,9 @@ def test_single_execution_manager_router_dispatch_and_bridge_cancel(
     monkeypatch.setattr(em_mod, "validate_command_arguments", lambda *a, **kw: None)
 
     pid_file = ws / "child.pid"
-    mgr = ExecutionManager(workspace_root=ws)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=ws
+    )
     executor = SubprocessExecutor(execution_manager=mgr)
 
     mock_service = MagicMock()
@@ -180,6 +183,7 @@ def test_over_256kb_combined_stdout_stderr_budget_and_byte_counts(
 
     emitted_chunks: list[tuple[str, str, str]] = []
     mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
         workspace_root=ws,
         output_listener=lambda eid, s, t: emitted_chunks.append((eid, s, t)),
     )
@@ -231,6 +235,7 @@ def test_cancel_while_pipe_readers_blocked(ws: Path, monkeypatch: pytest.MonkeyP
 
     started = threading.Event()
     mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
         workspace_root=ws,
         lifecycle_listener=lambda eid, evt, p: started.set() if evt == "started" else None,
     )
@@ -272,6 +277,7 @@ def test_concurrent_cancel_and_shutdown_idempotent(ws: Path, monkeypatch: pytest
 
     started = threading.Event()
     mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"},
         workspace_root=ws,
         lifecycle_listener=lambda eid, evt, p: started.set() if evt == "started" else None,
     )
@@ -308,7 +314,9 @@ def test_cancel_racing_with_natural_completion(ws: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(em_mod, "resolve_executable", lambda cmd, allowed: Path(sys.executable))
     monkeypatch.setattr(em_mod, "validate_command_arguments", lambda *a, **kw: None)
 
-    mgr = ExecutionManager(workspace_root=ws)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=ws
+    )
     for i in range(5):
         eid = f"race-nat-{i}"
         holder: list = []
@@ -422,7 +430,9 @@ def test_qml_execution_drawer_controls_bounding_and_dismiss(
     app = QGuiApplication.instance() or QGuiApplication([])
     mock_service = MagicMock()
     mock_service.active_conversation_id = ""
-    mgr = ExecutionManager(workspace_root=ws)
+    mgr = ExecutionManager(
+        allowed_commands=DEFAULT_ALLOWLISTED_COMMANDS | {"printf"}, workspace_root=ws
+    )
     bridge = OrionBridge(assistant_service=mock_service, execution_manager=mgr)
 
     engine = QQmlApplicationEngine()

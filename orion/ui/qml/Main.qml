@@ -16,6 +16,9 @@ ApplicationWindow {
     color: "#F4F1E9"
 
     readonly property bool busy: (typeof orion !== "undefined" && orion !== null) ? orion.isBusy : false
+    readonly property bool showThinking: (typeof orion !== "undefined" && orion !== null) ? orion.showThinking : false
+    readonly property bool thinkingSupported: (typeof orion !== "undefined" && orion !== null) ? orion.thinkingSupported : false
+    readonly property int maxThinkingChars: 32768
     property string activeConversationId: (typeof orion !== "undefined" && orion !== null) ? orion.activeConversationId : ""
     property bool isInitializing: true
 
@@ -85,7 +88,11 @@ ApplicationWindow {
             role: "user",
             text: message,
             status: "completed",
-            isError: false
+            isError: false,
+            thinkingText: "",
+            thinkingExpanded: false,
+            isThinkingActive: false,
+            thinkingTruncated: false
         })
 
         // Placeholder assistant message for incremental streaming output
@@ -93,7 +100,11 @@ ApplicationWindow {
             role: "assistant",
             text: "",
             status: "pending",
-            isError: false
+            isError: false,
+            thinkingText: "",
+            thinkingExpanded: false,
+            isThinkingActive: false,
+            thinkingTruncated: false
         })
 
         composer.clear()
@@ -150,7 +161,11 @@ ApplicationWindow {
                     role: msg.role,
                     text: displayText || "",
                     status: msg.status,
-                    isError: isErr
+                    isError: isErr,
+                    thinkingText: "",
+                    thinkingExpanded: false,
+                    isThinkingActive: false,
+                    thinkingTruncated: false
                 })
             }
             root.isInitializing = false
@@ -243,11 +258,33 @@ ApplicationWindow {
             root.executionError = errorMessage
         }
 
+        function onThinkingChunk(chunk, requestId) {
+            if (chatModel.count > 0) {
+                let lastIdx = chatModel.count - 1
+                let lastItem = chatModel.get(lastIdx)
+                if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
+                    chatModel.setProperty(lastIdx, "isThinkingActive", true)
+                    let cur = lastItem.thinkingText || ""
+                    let rem = root.maxThinkingChars - cur.length
+                    if (rem > 0) {
+                        let toAdd = chunk.length > rem ? chunk.slice(0, rem) : chunk
+                        chatModel.setProperty(lastIdx, "thinkingText", cur + toAdd)
+                    }
+                    if (chunk.length > rem) {
+                        chatModel.setProperty(lastIdx, "thinkingTruncated", true)
+                    }
+                    chatList.positionViewAtEnd()
+                    return
+                }
+            }
+        }
+
         function onResponseChunk(chunk, requestId) {
             if (chatModel.count > 0) {
                 let lastIdx = chatModel.count - 1
                 let lastItem = chatModel.get(lastIdx)
                 if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
+                    chatModel.setProperty(lastIdx, "isThinkingActive", false)
                     let currentText = lastItem.text || ""
                     chatModel.setProperty(lastIdx, "text", currentText + chunk)
                     chatList.positionViewAtEnd()
@@ -261,6 +298,7 @@ ApplicationWindow {
                 let lastIdx = chatModel.count - 1
                 let lastItem = chatModel.get(lastIdx)
                 if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
+                    chatModel.setProperty(lastIdx, "isThinkingActive", false)
                     chatModel.setProperty(lastIdx, "text", replyText)
                     chatModel.setProperty(lastIdx, "status", "completed")
                     Qt.callLater(function() {
@@ -274,7 +312,11 @@ ApplicationWindow {
                 role: "assistant",
                 text: replyText,
                 status: "completed",
-                isError: false
+                isError: false,
+                thinkingText: "",
+                thinkingExpanded: false,
+                isThinkingActive: false,
+                thinkingTruncated: false
             })
 
             Qt.callLater(function() {
@@ -780,6 +822,89 @@ ApplicationWindow {
                                             color: model.status === "interrupted" ? "#D97706" : "#C53929"
                                         }
 
+                                        // Collapsible Thinking Trace section (subordinate, plain-text only)
+                                        ColumnLayout {
+                                            visible: model.role === "assistant" && ((model.thinkingText && model.thinkingText.length > 0) || model.isThinkingActive)
+                                            Layout.fillWidth: true
+                                            spacing: 4
+
+                                            Rectangle {
+                                                id: thinkingToggleHeader
+                                                objectName: "thinkingToggleHeader"
+                                                Layout.fillWidth: true
+                                                implicitHeight: 26
+                                                radius: 8
+                                                color: "#E7E4DC"
+
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 8
+                                                    anchors.rightMargin: 8
+                                                    spacing: 6
+
+                                                    Text {
+                                                        text: model.thinkingExpanded ? "▾" : "▸"
+                                                        font.pixelSize: 11
+                                                        color: "#6B7065"
+                                                        textFormat: Text.PlainText
+                                                    }
+
+                                                    Text {
+                                                        text: model.isThinkingActive ? "Thinking..." : "Thinking"
+                                                        font.pixelSize: 11
+                                                        font.bold: true
+                                                        color: "#5E6458"
+                                                        textFormat: Text.PlainText
+                                                    }
+
+                                                    Text {
+                                                        visible: model.thinkingTruncated
+                                                        text: "(truncated)"
+                                                        font.pixelSize: 10
+                                                        color: "#B45309"
+                                                        textFormat: Text.PlainText
+                                                    }
+
+                                                    Item { Layout.fillWidth: true }
+                                                }
+
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    onClicked: {
+                                                        chatModel.setProperty(index, "thinkingExpanded", !model.thinkingExpanded)
+                                                    }
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                visible: model.thinkingExpanded
+                                                Layout.fillWidth: true
+                                                implicitHeight: Math.min(180, thinkingPlainText.implicitHeight + 14)
+                                                radius: 8
+                                                color: "#E9E6DE"
+                                                border.width: 1
+                                                border.color: "#DCD8CE"
+
+                                                ScrollView {
+                                                    anchors.fill: parent
+                                                    anchors.margins: 7
+                                                    clip: true
+                                                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                                                    Text {
+                                                        id: thinkingPlainText
+                                                        objectName: "thinkingPlainText"
+                                                        width: parent.width
+                                                        text: model.thinkingText || ""
+                                                        wrapMode: Text.Wrap
+                                                        textFormat: Text.PlainText
+                                                        font.pixelSize: 12
+                                                        color: "#5A5F55"
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         Text {
                                             id: bubbleText
                                             Layout.fillWidth: true
@@ -803,6 +928,28 @@ ApplicationWindow {
                             policy: ScrollBar.AsNeeded
                         }
                     }
+                }
+
+                // Thinking trace toggle bar
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    CheckBox {
+                        id: showThinkingToggle
+                        objectName: "showThinkingToggle"
+                        checked: root.showThinking
+                        enabled: root.thinkingSupported
+                        text: root.thinkingSupported ? "Show thinking" : "Show thinking (unavailable)"
+                        font.pixelSize: 12
+                        onToggled: {
+                            if (typeof orion !== "undefined" && orion !== null) {
+                                orion.setShowThinking(checked)
+                            }
+                        }
+                    }
+
+                    Item { Layout.fillWidth: true }
                 }
 
                 // Message composer

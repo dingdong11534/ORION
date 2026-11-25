@@ -1,6 +1,7 @@
 """Assistant service orchestrating conversation workflows, model inference, and persistence."""
 
 import logging
+import os
 import threading
 from collections.abc import Callable, Iterator, Sequence
 
@@ -13,6 +14,8 @@ from orion.application.contracts import (
     ConversationSummary,
     MessageStatus,
     PersistedMessage,
+    TextDelta,
+    ThinkingDelta,
     generate_request_id,
 )
 from orion.application.ports import (
@@ -78,6 +81,41 @@ class AssistantService:
     def active_conversation_id(self) -> str | None:
         """Return the current active conversation ID, if any."""
         return self._active_conversation_id
+
+    def supports_thinking(self) -> bool:
+        """Return True if the active model provider reports thinking capability."""
+        if hasattr(self._model_provider, "supports_thinking"):
+            try:
+                return bool(self._model_provider.supports_thinking())
+            except Exception:  # noqa: BLE001
+                return False
+        return False
+
+    def get_show_thinking(self) -> bool:
+        """Return the persisted Show thinking preference, falling back to ORION_OLLAMA_THINK (default False)."""
+        if self._settings_store is not None:
+            try:
+                saved = self._settings_store.get_setting("show_thinking_trace")
+                if isinstance(saved, str):
+                    lower = saved.strip().lower()
+                    if lower in ("true", "1", "yes"):
+                        return True
+                    if lower in ("false", "0", "no"):
+                        return False
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to read show_thinking_trace setting: %s", exc)
+        env_val = os.environ.get("ORION_OLLAMA_THINK", "").strip().lower()
+        return env_val in ("1", "true", "yes")
+
+    def set_show_thinking(self, enabled: bool) -> bool:
+        """Persist the Show thinking preference via SettingsStore."""
+        val = bool(enabled)
+        if self._settings_store is not None:
+            try:
+                self._settings_store.set_setting("show_thinking_trace", "true" if val else "false")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist show_thinking_trace setting: %s", exc)
+        return val
 
     def get_active_conversation(self) -> ConversationSummary | None:
         """Return the ConversationSummary for the active conversation, or None."""
@@ -416,6 +454,7 @@ class AssistantService:
         client_request_id: str | None = None,
         conversation_id: str | None = None,
         on_chunk: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> Iterator[str]:
         """Process incoming user message incrementally, yielding chunks and persisting once complete."""
         # A. Receive request & validate
@@ -505,30 +544,51 @@ class AssistantService:
 
         accumulated_chunks: list[str] = []
         try:
+            # Snapshot thinking preference at request start so mid-request toggles never alter it
+            snapshot_think = self.get_show_thinking() and self.supports_thinking()
+
             # D. Stream response chunks without holding open database transactions
             if cancellation_token.is_cancelled:
                 raise OllamaCancelledError("Generation cancelled by user.")
 
-            if hasattr(self._model_provider, "stream_response"):
-                chunk_iter = self._model_provider.stream_response(
+            if hasattr(self._model_provider, "stream_events"):
+                for event in self._model_provider.stream_events(
                     prompt=req.content,
                     history=chat_history,
                     cancellation_token=cancellation_token,
-                )
+                    think=snapshot_think,
+                ):
+                    if cancellation_token.is_cancelled:
+                        raise OllamaCancelledError("Generation cancelled by user.")
+                    if isinstance(event, ThinkingDelta):
+                        if snapshot_think and on_thinking is not None:
+                            on_thinking(event.text)
+                    elif isinstance(event, TextDelta):
+                        accumulated_chunks.append(event.text)
+                        if on_chunk is not None:
+                            on_chunk(event.text)
+                        yield event.text
             else:
-                full_text = self._model_provider.generate_response(
-                    prompt=req.content,
-                    history=chat_history,
-                )
-                chunk_iter = iter([full_text])
+                if hasattr(self._model_provider, "stream_response"):
+                    chunk_iter = self._model_provider.stream_response(
+                        prompt=req.content,
+                        history=chat_history,
+                        cancellation_token=cancellation_token,
+                    )
+                else:
+                    full_text = self._model_provider.generate_response(
+                        prompt=req.content,
+                        history=chat_history,
+                    )
+                    chunk_iter = iter([full_text])
 
-            for chunk in chunk_iter:
-                if cancellation_token.is_cancelled:
-                    raise OllamaCancelledError("Generation cancelled by user.")
-                accumulated_chunks.append(chunk)
-                if on_chunk is not None:
-                    on_chunk(chunk)
-                yield chunk
+                for chunk in chunk_iter:
+                    if cancellation_token.is_cancelled:
+                        raise OllamaCancelledError("Generation cancelled by user.")
+                    accumulated_chunks.append(chunk)
+                    if on_chunk is not None:
+                        on_chunk(chunk)
+                    yield chunk
 
             if cancellation_token.is_cancelled:
                 raise OllamaCancelledError("Generation cancelled by user.")

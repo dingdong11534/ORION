@@ -2,7 +2,14 @@ import re
 import time
 from collections.abc import Iterator, Sequence
 
-from orion.application.contracts import CancellationToken, ChatMessage
+from orion.application.contracts import (
+    CancellationToken,
+    ChatMessage,
+    GenerationCompleted,
+    GenerationEvent,
+    TextDelta,
+    ThinkingDelta,
+)
 from orion.infrastructure.ollama_model_provider import OllamaCancelledError
 
 
@@ -17,10 +24,18 @@ class FakeModelProvider:
         simulated_delay: float = 0.0,
         fixed_response: str | None = None,
         chunk_delay: float = 0.0,
+        thinking_text: str | None = None,
+        thinking_supported: bool = True,
     ) -> None:
         self.simulated_delay = simulated_delay
         self.fixed_response = fixed_response
         self.chunk_delay = chunk_delay
+        self.thinking_text = thinking_text
+        self.thinking_supported = thinking_supported
+
+    def supports_thinking(self) -> bool:
+        """Return whether this simulated provider supports thinking traces."""
+        return self.thinking_supported
 
     def generate_response(
         self,
@@ -84,3 +99,51 @@ class FakeModelProvider:
                     time.sleep(sleep_time)
                     elapsed += sleep_time
             yield token
+
+    def stream_events(
+        self,
+        prompt: str,
+        history: Sequence[ChatMessage] | None = None,
+        cancellation_token: CancellationToken | None = None,
+        think: bool | None = None,
+    ) -> Iterator[GenerationEvent]:
+        """Stream provider-neutral ThinkingDelta / TextDelta / GenerationCompleted events."""
+        if cancellation_token and cancellation_token.is_cancelled:
+            raise OllamaCancelledError("Simulated generation cancelled before start.")
+
+        if self.simulated_delay > 0:
+            elapsed = 0.0
+            step = 0.05
+            while elapsed < self.simulated_delay:
+                if cancellation_token and cancellation_token.is_cancelled:
+                    raise OllamaCancelledError(
+                        "Simulated generation cancelled during initial delay."
+                    )
+                sleep_time = min(step, self.simulated_delay - elapsed)
+                time.sleep(sleep_time)
+                elapsed += sleep_time
+
+        if think and self.thinking_supported and self.thinking_text:
+            for t_tok in re.findall(r"\S+|\s+", self.thinking_text):
+                if cancellation_token and cancellation_token.is_cancelled:
+                    raise OllamaCancelledError("Simulated generation cancelled during thinking.")
+                if self.chunk_delay > 0:
+                    time.sleep(self.chunk_delay)
+                yield ThinkingDelta(text=t_tok)
+
+        full_text = (
+            self.fixed_response
+            if self.fixed_response is not None
+            else (
+                f'[Simulated response] Echoing message: "{prompt}".\n'
+                "(ORION simulated mode — local AI model not connected yet)"
+            )
+        )
+        for token in re.findall(r"\S+|\s+", full_text):
+            if cancellation_token and cancellation_token.is_cancelled:
+                raise OllamaCancelledError("Simulated generation cancelled.")
+            if self.chunk_delay > 0:
+                time.sleep(self.chunk_delay)
+            yield TextDelta(text=token)
+
+        yield GenerationCompleted(stop_reason="stop", final_text=full_text)
