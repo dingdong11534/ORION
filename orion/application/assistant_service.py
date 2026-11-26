@@ -21,7 +21,12 @@ from orion.application.contracts import (
     generate_request_id,
 )
 from orion.application.knowledge.contracts import KnowledgeScope
-from orion.application.knowledge.retrieval import DocumentRetrievalService, build_rag_prompt
+from orion.application.knowledge.query_resolver import KnowledgeQueryContextResolver
+from orion.application.knowledge.retrieval import (
+    DocumentRetrievalService,
+    build_rag_prompt,
+    validate_citations,
+)
 from orion.application.ports import (
     ConversationNotFoundError,
     ConversationStore,
@@ -56,6 +61,7 @@ class AssistantService:
         self._conversation_store = conversation_store
         self._settings_store = settings_store
         self._retrieval_service = retrieval_service
+        self._query_resolver = KnowledgeQueryContextResolver()
         if max_history_messages is None:
             env_limit = os.environ.get("ORION_MAX_HISTORY_MESSAGES", "12").strip()
             try:
@@ -193,15 +199,52 @@ class AssistantService:
                 "chunk_id": p.chunk_id,
                 "document_id": p.document_id,
                 "display_name": p.display_name,
+                "file_type": p.file_type,
                 "source_path": p.source_path,
                 "chunk_index": p.chunk_index,
                 "page_number": p.page_number if p.page_number is not None else -1,
+                "display_chapter_number": (
+                    p.display_chapter_number if p.display_chapter_number is not None else -1
+                ),
+                "reading_position": p.reading_position if p.reading_position is not None else -1,
+                "chapter_title": p.chapter_title or "",
                 "section_title": p.section_title or "",
+                "source_locator": p.source_locator or "",
                 "excerpt": p.excerpt,
                 "content": p.content,
             }
             for p in passages
         ]
+
+    def get_passage_context(self, document_id: str, chunk_index: int) -> str:
+        """Return bounded adjacent chunk context for Source Inspector."""
+        if self._retrieval_service is None:
+            return ""
+        store = getattr(self._retrieval_service, "_store", None)
+        if store is not None and hasattr(store, "get_adjacent_context"):
+            return str(store.get_adjacent_context(document_id, chunk_index, window=1))
+        return ""
+
+    def update_conversation_knowledge_context(
+        self,
+        conversation_id: str | None = None,
+        *,
+        knowledge_scope: str | None = None,
+        selected_document_ids: Sequence[str] | None = None,
+        active_document_id: str | None = None,
+    ) -> ConversationSummary | None:
+        """Persist knowledge context for the target/active conversation."""
+        cid = conversation_id or self._active_conversation_id
+        if not cid or not hasattr(
+            self._conversation_store, "update_conversation_knowledge_context"
+        ):
+            return None
+        return self._conversation_store.update_conversation_knowledge_context(
+            cid,
+            knowledge_scope=knowledge_scope,
+            selected_document_ids=selected_document_ids,
+            active_document_id=active_document_id,
+        )
 
     def get_active_conversation(self) -> ConversationSummary | None:
         """Return the ConversationSummary for the active conversation, or None."""
@@ -634,52 +677,105 @@ class AssistantService:
             # Snapshot thinking preference at request start so mid-request toggles never alter it
             snapshot_think = self.get_show_thinking() and self.supports_thinking()
 
-            # D. Optional local RAG retrieval governed by explicit KnowledgeScope
+            # D. Optional local RAG retrieval governed by explicit KnowledgeScope + Conversation Context
             model_prompt = req.content
             clean_doc_ids = [d for d in (selected_document_ids or ()) if d and d.strip()]
+            conv_summary = (
+                self._conversation_store.get_conversation(cid)
+                if hasattr(self._conversation_store, "get_conversation")
+                else None
+            )
             if knowledge_scope is not None:
                 effective_scope = knowledge_scope
             elif clean_doc_ids:
                 effective_scope = KnowledgeScope.SELECTED_DOCUMENTS
+            elif (
+                conv_summary is not None
+                and conv_summary.knowledge_scope == KnowledgeScope.ALL_INDEXED.value
+            ):
+                effective_scope = KnowledgeScope.ALL_INDEXED
+            elif (
+                conv_summary is not None
+                and conv_summary.knowledge_scope == KnowledgeScope.SELECTED_DOCUMENTS.value
+                and conv_summary.selected_document_ids
+            ):
+                effective_scope = KnowledgeScope.SELECTED_DOCUMENTS
+                clean_doc_ids = list(conv_summary.selected_document_ids)
             else:
                 effective_scope = KnowledgeScope.NONE
 
+            active_retrieval_passages = ()
             if (
                 effective_scope in (KnowledgeScope.ALL_INDEXED, KnowledgeScope.SELECTED_DOCUMENTS)
                 and self._retrieval_service is not None
             ):
-                retrieval = self._retrieval_service.retrieve(
+                recent_user_msgs = [
+                    m.content for m in chat_history if m.role == "user" and m.content
+                ]
+                last_kq = conv_summary.last_knowledge_question if conv_summary else None
+                resolved_q = self._query_resolver.resolve(
                     req.content,
+                    recent_user_messages=recent_user_msgs,
+                    last_knowledge_question=last_kq,
+                )
+                if resolved_q.needs_clarification:
+                    clar_msg = resolved_q.clarification_message or (
+                        "Could you clarify which topic or document section you are referring to?"
+                    )
+                    accumulated_chunks.append(clar_msg)
+                    if on_chunk is not None:
+                        on_chunk(clar_msg)
+                    yield clar_msg
+                    self._conversation_store.complete_request(
+                        conversation_id=cid,
+                        client_request_id=req.client_request_id,
+                        response_content=clar_msg,
+                    )
+                    return
+
+                retrieval = self._retrieval_service.retrieve(
+                    resolved_q.resolved_query,
                     clean_doc_ids,
                     scope=effective_scope,
                 )
+                active_retrieval_passages = retrieval.passages
+                refs_payload = [
+                    {
+                        "citation_id": f"S{idx}",
+                        "chunk_id": p.chunk_id,
+                        "document_id": p.document_id,
+                        "display_name": p.display_name,
+                        "file_type": p.file_type,
+                        "source_path": p.source_path,
+                        "chunk_index": p.chunk_index,
+                        "page_number": p.page_number if p.page_number is not None else -1,
+                        "reading_position": (
+                            p.reading_position if p.reading_position is not None else -1
+                        ),
+                        "display_chapter_number": (
+                            p.display_chapter_number if p.display_chapter_number is not None else -1
+                        ),
+                        "chapter_title": p.chapter_title or "",
+                        "section_title": p.section_title or "",
+                        "source_locator": p.source_locator or "",
+                        "scope_summary": retrieval.scope_summary or "",
+                        "excerpt": p.excerpt,
+                        "content": p.content,
+                        "is_selected_source": p.is_selected_source,
+                    }
+                    for idx, p in enumerate(retrieval.passages, start=1)
+                ]
                 if on_references is not None:
-                    refs_payload = [
-                        {
-                            "chunk_id": p.chunk_id,
-                            "document_id": p.document_id,
-                            "display_name": p.display_name,
-                            "source_path": p.source_path,
-                            "chunk_index": p.chunk_index,
-                            "page_number": p.page_number if p.page_number is not None else -1,
-                            "section_title": p.section_title or "",
-                            "reading_position": (
-                                p.reading_position if p.reading_position is not None else -1
-                            ),
-                            "display_chapter_number": (
-                                p.display_chapter_number
-                                if p.display_chapter_number is not None
-                                else -1
-                            ),
-                            "chapter_title": p.chapter_title or "",
-                            "source_locator": p.source_locator or "",
-                            "scope_summary": retrieval.scope_summary or "",
-                            "excerpt": p.excerpt,
-                            "is_selected_source": p.is_selected_source,
-                        }
-                        for p in retrieval.passages
-                    ]
                     on_references(refs_payload)
+                if hasattr(self._conversation_store, "update_conversation_knowledge_context"):
+                    self._conversation_store.update_conversation_knowledge_context(
+                        cid,
+                        knowledge_scope=effective_scope.value,
+                        selected_document_ids=clean_doc_ids,
+                        active_document_id=clean_doc_ids[0] if len(clean_doc_ids) == 1 else "",
+                        last_knowledge_question=req.content,
+                        last_references=refs_payload,
+                    )
                 if not retrieval.has_evidence:
                     if retrieval.spoiler_warning:
                         no_ev_msg = retrieval.spoiler_warning
@@ -709,6 +805,13 @@ class AssistantService:
                     )
                     return
                 model_prompt = build_rag_prompt(req.content, retrieval)
+            elif hasattr(self._conversation_store, "update_conversation_knowledge_context"):
+                self._conversation_store.update_conversation_knowledge_context(
+                    cid,
+                    knowledge_scope=KnowledgeScope.NONE.value,
+                    selected_document_ids=[],
+                    active_document_id="",
+                )
 
             # Stream response chunks without holding open database transactions
             if cancellation_token.is_cancelled:
@@ -760,6 +863,10 @@ class AssistantService:
 
             # E. Successful completion (only if stop_reason == 'stop'; truncated stays incomplete)
             full_response = "".join(accumulated_chunks)
+            if active_retrieval_passages:
+                full_response, _valid_cites, _invalid_cites = validate_citations(
+                    full_response, active_retrieval_passages
+                )
             if completion_stop_reason != "stop":
                 self._conversation_store.interrupt_request(
                     conversation_id=cid,

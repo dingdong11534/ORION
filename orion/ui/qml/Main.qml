@@ -58,6 +58,7 @@ ApplicationWindow {
     property string lastWorkspaceAddedDocId: ""
 
     property var inspectedReference: null
+    property string inspectedPassageContext: ""
     property string pendingDeleteId: ""
     property string pendingDeleteTitle: ""
 
@@ -105,10 +106,14 @@ ApplicationWindow {
         if (idx === -1) next.push(docId)
         else next.splice(idx, 1)
         root.selectedKnowledgeIds = next
+        if (typeof orion !== "undefined" && orion !== null)
+            orion.setConversationSelectedSources(next)
     }
 
     function clearKnowledgeScope() {
         root.selectedKnowledgeIds = []
+        if (typeof orion !== "undefined" && orion !== null)
+            orion.setConversationSelectedSources([])
     }
 
     function setChatKnowledgeMode(mode) {
@@ -133,6 +138,10 @@ ApplicationWindow {
 
     function openReferenceModal(refObj) {
         root.inspectedReference = refObj
+        root.inspectedPassageContext = ""
+        if (refObj && refObj.document_id && typeof orion !== "undefined" && orion !== null) {
+            orion.loadPassageContext(refObj.document_id, refObj.chunk_index || 0)
+        }
     }
 
     function startAskKnowledge(prefillPrompt, docIds) {
@@ -555,6 +564,16 @@ ApplicationWindow {
             root.epubChaptersOffset = offset || 0
         }
 
+        function onConversationKnowledgeContextChanged(mode, selectedIds) {
+            root.selectedKnowledgeIds = selectedIds ? selectedIds.slice() : []
+        }
+
+        function onPassageContextLoaded(docId, chunkIdx, contextText) {
+            if (root.inspectedReference && root.inspectedReference.document_id === docId) {
+                root.inspectedPassageContext = contextText || ""
+            }
+        }
+
         function onWorkspaceAddedToKnowledge(relativePath, docId, alreadyIndexed) {
             root.lastWorkspaceAddedDocId = docId || ""
             root.knowledgeStatusNote = alreadyIndexed
@@ -816,6 +835,7 @@ ApplicationWindow {
 
     // Source Reference Inspector Modal
     Rectangle {
+        objectName: "sourceInspectorModal"
         visible: root.inspectedReference !== null
         anchors.fill: parent
         color: "#66000000"
@@ -823,8 +843,8 @@ ApplicationWindow {
         MouseArea { anchors.fill: parent; onClicked: root.inspectedReference = null }
 
         Rectangle {
-            width: Math.min(parent.width - 48, 600)
-            height: Math.min(parent.height - 48, 420)
+            width: Math.min(parent.width - 48, 640)
+            height: Math.min(parent.height - 48, 480)
             radius: theme.radiusLg
             color: theme.bgSurface
             anchors.centerIn: parent
@@ -838,14 +858,33 @@ ApplicationWindow {
 
                 RowLayout {
                     Layout.fillWidth: true
+                    spacing: theme.spaceSm
                     Text {
                         Layout.fillWidth: true
-                        text: root.inspectedReference ? (root.inspectedReference.display_name || "Source Reference") : ""
+                        text: {
+                            if (!root.inspectedReference) return "Source Reference"
+                            const cid = root.inspectedReference.citation_id ? ("[" + root.inspectedReference.citation_id + "] ") : ""
+                            return cid + (root.inspectedReference.display_name || "Source Reference")
+                        }
                         font.pixelSize: theme.fontLg
                         font.bold: true
                         color: theme.textPrimary
                         elide: Text.ElideRight
                         textFormat: Text.PlainText
+                    }
+                    Button {
+                        objectName: "openOriginalSourceButton"
+                        visible: Boolean(root.inspectedReference && root.inspectedReference.source_path)
+                        text: "Open Original"
+                        implicitHeight: 28
+                        implicitWidth: implicitContentWidth + 16
+                        onClicked: {
+                            if (root.inspectedReference && root.inspectedReference.source_path) {
+                                Qt.openUrlExternally("file://" + root.inspectedReference.source_path)
+                            }
+                        }
+                        background: Rectangle { radius: 6; color: theme.accentLight; border.width: 1; border.color: theme.accent }
+                        contentItem: Text { text: parent.text; font.pixelSize: theme.fontXs; font.bold: true; color: theme.accent; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
                     }
                     Button {
                         text: "Close"
@@ -862,8 +901,10 @@ ApplicationWindow {
                     text: {
                         if (!root.inspectedReference) return ""
                         let meta = root.inspectedReference.source_path || ""
-                        if (root.inspectedReference.page_number > 0) meta += " · Page " + root.inspectedReference.page_number
-                        if (root.inspectedReference.section_title) meta += " · " + root.inspectedReference.section_title
+                        if (root.inspectedReference.display_chapter_number > 0) meta += " · Ch. " + root.inspectedReference.display_chapter_number
+                        else if (root.inspectedReference.page_number > 0) meta += " · Page " + root.inspectedReference.page_number
+                        if (root.inspectedReference.chapter_title) meta += " · " + root.inspectedReference.chapter_title
+                        else if (root.inspectedReference.section_title) meta += " · " + root.inspectedReference.section_title
                         return meta
                     }
                     font.pixelSize: theme.fontXs
@@ -880,7 +921,9 @@ ApplicationWindow {
                     TextArea {
                         readOnly: true
                         selectByMouse: true
-                        text: root.inspectedReference ? (root.inspectedReference.content || root.inspectedReference.excerpt || "") : ""
+                        text: root.inspectedPassageContext
+                            ? root.inspectedPassageContext
+                            : (root.inspectedReference ? (root.inspectedReference.content || root.inspectedReference.excerpt || "") : "")
                         font.pixelSize: theme.fontMd
                         color: theme.textPrimary
                         wrapMode: TextEdit.Wrap

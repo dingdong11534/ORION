@@ -32,12 +32,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _scope_to_mode(scope_str: str) -> str:
+    low = (scope_str or "none").strip().lower()
+    if low == "all_indexed":
+        return "ask_knowledge"
+    if low == "selected_documents":
+        return "selected_sources"
+    return "chat"
+
+
 def _conv_to_dict(c: ConversationSummary) -> dict[str, Any]:
     return {
         "id": c.id,
         "title": c.title,
         "created_at": c.created_at.isoformat(),
         "updated_at": c.updated_at.isoformat(),
+        "knowledge_scope": getattr(c, "knowledge_scope", "none"),
+        "selected_document_ids": list(getattr(c, "selected_document_ids", ())),
+        "active_document_id": getattr(c, "active_document_id", None) or "",
+        "last_knowledge_question": getattr(c, "last_knowledge_question", None) or "",
+        "last_references": list(getattr(c, "last_references", ())),
     }
 
 
@@ -103,6 +117,8 @@ class OrionBridge(QObject):
     knowledgeBusyChanged = Signal(bool)
     knowledgeProgress = Signal(dict)
     knowledgeModeChanged = Signal(str)
+    conversationKnowledgeContextChanged = Signal(str, list)
+    passageContextLoaded = Signal(str, int, str)
     knowledgeSearchResults = Signal(str, list)
     epubChaptersLoaded = Signal(str, list, int, int)
     workspaceAddedToKnowledge = Signal(str, str, bool)
@@ -232,12 +248,47 @@ class OrionBridge(QObject):
 
     @Slot(str)
     def setKnowledgeMode(self, mode: str) -> None:
-        """Persist and broadcast the active knowledge mode."""
+        """Persist and broadcast the active knowledge mode (and update active conversation)."""
         if self._is_shutting_down:
             return
         if hasattr(self._service, "set_knowledge_mode"):
             new_mode = self._service.set_knowledge_mode(mode)
+            if hasattr(self._service, "update_conversation_knowledge_context"):
+                scope_val = (
+                    "all_indexed"
+                    if new_mode == "ask_knowledge"
+                    else ("selected_documents" if new_mode == "selected_sources" else "none")
+                )
+                self._service.update_conversation_knowledge_context(knowledge_scope=scope_val)
             self.knowledgeModeChanged.emit(new_mode)
+
+    @Slot(list)
+    def setConversationSelectedSources(self, selected_document_ids: list) -> None:
+        """Persist selected source IDs for the active conversation."""
+        if self._is_shutting_down:
+            return
+        clean = [str(d) for d in (selected_document_ids or []) if str(d).strip()]
+        if hasattr(self._service, "update_conversation_knowledge_context"):
+            self._service.update_conversation_knowledge_context(
+                selected_document_ids=clean,
+                active_document_id=clean[0] if len(clean) == 1 else "",
+            )
+
+    @Slot(str, int)
+    def loadPassageContext(self, document_id: str, chunk_index: int) -> None:
+        """Load nearby adjacent chunk text for the Source Reference Inspector."""
+        if self._is_shutting_down or not document_id:
+            return
+
+        def _task(_token: CancellationToken) -> tuple[str, Any]:
+            ctx = (
+                self._service.get_passage_context(document_id, chunk_index)
+                if hasattr(self._service, "get_passage_context")
+                else ""
+            )
+            return ("passage_ctx", (document_id, chunk_index, ctx))
+
+        self._run_knowledge_worker(_task)
 
     @Property(str, constant=True)
     def supportedKnowledgeFormats(self) -> str:
@@ -349,6 +400,9 @@ class OrionBridge(QObject):
             elif op_name == "chapters":
                 doc_id, chapters, total, offset = data
                 self.epubChaptersLoaded.emit(doc_id, chapters, total, offset)
+            elif op_name == "passage_ctx":
+                doc_id, cidx, ctx_txt = data
+                self.passageContextLoaded.emit(doc_id, cidx, ctx_txt)
             elif op_name == "workspace_import":
                 rel_p, doc_id, already_indexed, sources = data
                 self.knowledgeSourcesLoaded.emit(sources)
@@ -1130,11 +1184,21 @@ class OrionBridge(QObject):
                 self.conversationsLoaded.emit(convs, active_id)
                 self.activeConversationChanged.emit(active_id)
                 self.historyLoaded.emit(history)
+                active_conv = next((c for c in convs if c["id"] == active_id), None)
+                if active_conv is not None:
+                    restored_mode = _scope_to_mode(active_conv.get("knowledge_scope", "none"))
+                    restored_ids = list(active_conv.get("selected_document_ids", []))
+                    self.conversationKnowledgeContextChanged.emit(restored_mode, restored_ids)
+                    self.knowledgeModeChanged.emit(restored_mode)
                 return
             if tag == "conversation_selected":
                 _, conv_dict, history = result
                 self.activeConversationChanged.emit(conv_dict["id"])
                 self.historyLoaded.emit(history)
+                restored_mode = _scope_to_mode(conv_dict.get("knowledge_scope", "none"))
+                restored_ids = list(conv_dict.get("selected_document_ids", []))
+                self.conversationKnowledgeContextChanged.emit(restored_mode, restored_ids)
+                self.knowledgeModeChanged.emit(restored_mode)
                 return
             if tag == "conversation_created":
                 _, conv_dict, convs = result
@@ -1142,6 +1206,8 @@ class OrionBridge(QObject):
                 self.conversationsLoaded.emit(convs, conv_dict["id"])
                 self.activeConversationChanged.emit(conv_dict["id"])
                 self.historyLoaded.emit([])
+                self.conversationKnowledgeContextChanged.emit("chat", [])
+                self.knowledgeModeChanged.emit("chat")
                 return
             if tag == "conversation_deleted":
                 _, deleted_id, was_active, convs, active_id = result

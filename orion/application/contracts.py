@@ -149,6 +149,11 @@ class ConversationSummary(BaseModel):
     title: str
     created_at: datetime
     updated_at: datetime
+    knowledge_scope: str = "none"
+    selected_document_ids: tuple[str, ...] = ()
+    active_document_id: str | None = None
+    last_knowledge_question: str | None = None
+    last_references: tuple[dict[str, Any], ...] = ()
 
     @field_validator("created_at", "updated_at")
     @classmethod

@@ -79,6 +79,11 @@ class ConversationModel(Base):
     id: Mapped[str] = mapped_column(String(37), primary_key=True, default=generate_conversation_id)
     title: Mapped[str] = mapped_column(String, nullable=False, default="New Conversation")
     next_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    knowledge_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    selected_document_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    active_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_knowledge_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_references_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime, nullable=False, default=utc_now, onupdate=utc_now

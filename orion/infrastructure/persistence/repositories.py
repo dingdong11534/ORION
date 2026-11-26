@@ -94,11 +94,28 @@ def _msg_to_contract(m: MessageModel) -> PersistedMessage:
 
 
 def _conv_to_summary(c: ConversationModel) -> ConversationSummary:
+    try:
+        sel_ids = json.loads(c.selected_document_ids_json or "[]")
+        if not isinstance(sel_ids, list):
+            sel_ids = []
+    except Exception:  # noqa: BLE001
+        sel_ids = []
+    try:
+        last_refs = json.loads(c.last_references_json or "[]")
+        if not isinstance(last_refs, list):
+            last_refs = []
+    except Exception:  # noqa: BLE001
+        last_refs = []
     return ConversationSummary(
         id=c.id,
         title=c.title,
         created_at=c.created_at,
         updated_at=c.updated_at,
+        knowledge_scope=c.knowledge_scope or "none",
+        selected_document_ids=tuple(str(x) for x in sel_ids if str(x).strip()),
+        active_document_id=c.active_document_id,
+        last_knowledge_question=c.last_knowledge_question,
+        last_references=tuple(r for r in last_refs if isinstance(r, dict)),
     )
 
 
@@ -315,6 +332,62 @@ class SqliteConversationStore:
                     .all()
                 )
                 return [_conv_to_summary(c) for c in rows]
+
+        return _with_busy_retry(_run)
+
+    def update_conversation_knowledge_context(
+        self,
+        conversation_id: str,
+        *,
+        knowledge_scope: str | None = None,
+        selected_document_ids: Sequence[str] | None = None,
+        active_document_id: str | None = None,
+        last_knowledge_question: str | None = None,
+        last_references: Sequence[dict[str, Any]] | None = None,
+    ) -> ConversationSummary | None:
+        """Persist knowledge scope, selected sources, and last references for a conversation."""
+
+        def _run() -> ConversationSummary | None:
+            with self._factory() as session:
+                conv = session.get(ConversationModel, conversation_id)
+                if conv is None:
+                    return None
+                if knowledge_scope is not None:
+                    conv.knowledge_scope = knowledge_scope
+                if selected_document_ids is not None:
+                    clean_ids = list(
+                        dict.fromkeys(str(d) for d in selected_document_ids if str(d).strip())
+                    )
+                    conv.selected_document_ids_json = json.dumps(clean_ids)
+                if active_document_id is not None:
+                    conv.active_document_id = active_document_id or None
+                if last_knowledge_question is not None:
+                    conv.last_knowledge_question = last_knowledge_question
+                if last_references is not None:
+                    # Store compact metadata only (no full chunk content bloat)
+                    compact = [
+                        {
+                            "citation_id": r.get("citation_id", ""),
+                            "chunk_id": r.get("chunk_id", ""),
+                            "document_id": r.get("document_id", ""),
+                            "display_name": r.get("display_name", ""),
+                            "file_type": r.get("file_type", ""),
+                            "source_path": r.get("source_path", ""),
+                            "chunk_index": r.get("chunk_index", 0),
+                            "page_number": r.get("page_number", -1),
+                            "display_chapter_number": r.get("display_chapter_number", -1),
+                            "reading_position": r.get("reading_position", -1),
+                            "chapter_title": r.get("chapter_title", ""),
+                            "section_title": r.get("section_title", ""),
+                            "source_locator": r.get("source_locator", ""),
+                            "excerpt": str(r.get("excerpt", ""))[:240],
+                        }
+                        for r in last_references[:12]
+                    ]
+                    conv.last_references_json = json.dumps(compact)
+                session.commit()
+                session.refresh(conv)
+                return _conv_to_summary(conv)
 
         return _with_busy_retry(_run)
 

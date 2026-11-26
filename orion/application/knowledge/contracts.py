@@ -35,6 +35,7 @@ class AnswerIntent(StrEnum):
     """Deterministic query intent classification for retrieval diversification & prompting."""
 
     FACTUAL_LOOKUP = "factual_lookup"
+    EXPLANATION = "explanation"
     CHARACTER_ANALYSIS = "character_analysis"
     TIMELINE = "timeline"
     COMPARISON = "comparison"
@@ -204,6 +205,7 @@ class RetrievedPassage(BaseModel):
     chunk_id: str
     document_id: str
     display_name: str
+    file_type: str = ""
     source_path: str
     chunk_index: int
     page_number: int | None = None

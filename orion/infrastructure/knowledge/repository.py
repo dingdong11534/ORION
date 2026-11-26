@@ -492,7 +492,7 @@ class SqliteKnowledgeStore(KnowledgeStorePort):
             )
 
         base_select = (
-            "SELECT f.chunk_id, f.document_id, s.display_name, s.source_path, "
+            "SELECT f.chunk_id, f.document_id, s.display_name, s.file_type, s.source_path, "
             "c.chunk_index, c.page_number, c.section_title, "
             "c.spine_index, c.chapter_index, c.reading_position, c.display_chapter_number, "
             "c.chapter_title, c.source_locator, "
@@ -525,6 +525,7 @@ class SqliteKnowledgeStore(KnowledgeStorePort):
                 chunk_id=str(r["chunk_id"]),
                 document_id=str(r["document_id"]),
                 display_name=str(r["display_name"]),
+                file_type=str(r["file_type"] or ""),
                 source_path=str(r["source_path"]),
                 chunk_index=int(r["chunk_index"]),
                 page_number=r["page_number"],
@@ -542,3 +543,19 @@ class SqliteKnowledgeStore(KnowledgeStorePort):
             )
             for r in rows
         ]
+
+    def get_adjacent_context(self, document_id: str, chunk_index: int, window: int = 1) -> str:
+        """Return bounded surrounding chunk text for the Source Inspector."""
+        lo = max(0, int(chunk_index) - max(0, window))
+        hi = int(chunk_index) + max(0, window)
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(DocumentChunkModel.chunk_index, DocumentChunkModel.content)
+                .where(
+                    DocumentChunkModel.document_id == document_id,
+                    DocumentChunkModel.chunk_index >= lo,
+                    DocumentChunkModel.chunk_index <= hi,
+                )
+                .order_by(DocumentChunkModel.chunk_index.asc())
+            ).all()
+        return "\n\n---\n\n".join(str(r[1]) for r in rows if r[1])

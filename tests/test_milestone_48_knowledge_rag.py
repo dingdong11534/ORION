@@ -219,17 +219,27 @@ def test_chunker_overlap_page_boundaries_and_large_doc(tmp_path: Path):
 def test_migration_preserves_existing_data_and_fts5_crud(tmp_path: Path):
     conv_store, _settings, kb_store, engine, cfg = _make_stores(tmp_path, rev="0002")
     try:
-        conv = conv_store.create_conversation("Preserved Chat")
+        from sqlalchemy import text as sql_text
+
+        legacy_id = "conv_legacy_0002_row"
+        with engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    "INSERT INTO conversations (id, title, next_sequence, created_at, updated_at) "
+                    "VALUES (:cid, 'Preserved Chat', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                ),
+                {"cid": legacy_id},
+            )
         engine.dispose()
 
-        # Upgrade 0002 -> 0003
+        # Upgrade 0002 -> head
         command.upgrade(cfg, "head")
         engine = create_db_engine(tmp_path / "kb.db")
         factory = create_session_factory(engine)
         conv_store = SqliteConversationStore(factory)
         kb_store = SqliteKnowledgeStore(factory)
 
-        assert any(c.id == conv.id for c in conv_store.list_conversations())
+        assert any(c.id == legacy_id for c in conv_store.list_conversations())
 
         svc = KnowledgeService(LocalDocumentExtractor(), kb_store)
         doc_a = tmp_path / "alpha.txt"

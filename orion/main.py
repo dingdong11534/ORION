@@ -33,7 +33,7 @@ from orion.ui.qt_bridge import OrionBridge
 logger = logging.getLogger(__name__)
 
 # Maintained for backward compatibility with existing tests
-_EXPECTED_ALEMBIC_REVISION = "0005"
+_EXPECTED_ALEMBIC_REVISION = "0006"
 
 
 def activate_window(engine: QQmlApplicationEngine) -> None:

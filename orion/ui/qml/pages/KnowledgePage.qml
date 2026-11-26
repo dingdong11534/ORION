@@ -614,15 +614,32 @@ Rectangle {
                         }
                     }
 
-                    Text {
+                    ColumnLayout {
                         visible: knowledgePage.filteredSources.length === 0
                         Layout.fillWidth: true
-                        horizontalAlignment: Text.AlignHCenter
-                        text: knowledgeSourcesModel.count === 0 ? "No documents indexed yet. Click '+ Import Files' or '+ Import Folder' to get started." : "No documents match the current filter."
-                        font.pixelSize: theme.fontSm
-                        color: theme.textMuted
-                        wrapMode: Text.Wrap
-                        textFormat: Text.PlainText
+                        spacing: 6
+
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: knowledgeSourcesModel.count === 0 ? "Getting Started with ORION Knowledge" : "No documents match the current filter."
+                            font.pixelSize: theme.fontMd
+                            font.bold: knowledgeSourcesModel.count === 0
+                            color: knowledgeSourcesModel.count === 0 ? theme.textPrimary : theme.textMuted
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                        }
+
+                        Text {
+                            visible: knowledgeSourcesModel.count === 0
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: "1. Click '+ Import Files' or '+ Import Folder'.\n2. Wait for indexing to reach 'indexed'.\n3. Choose Ask Knowledge or Selected Sources in Chat.\n4. Ask questions and natural follow-ups.\n5. Click 'Show sources' and 'Inspect' to verify excerpts."
+                            font.pixelSize: theme.fontXs
+                            color: theme.textSecondary
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                        }
                     }
                 }
             }
