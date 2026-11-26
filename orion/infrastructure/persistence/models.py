@@ -57,6 +57,16 @@ def generate_request_id() -> str:
     return f"req_{uuid.uuid4().hex}"
 
 
+def generate_document_id() -> str:
+    """Generate prefixed UUIDv4 for an indexed document source ('doc_' + 32 hex chars)."""
+    return f"doc_{uuid.uuid4().hex}"
+
+
+def generate_chunk_id() -> str:
+    """Generate prefixed UUIDv4 for an indexed document chunk ('chk_' + 32 hex chars)."""
+    return f"chk_{uuid.uuid4().hex}"
+
+
 class Base(DeclarativeBase):
     """Base declarative class for all SQLAlchemy ORM models."""
 
@@ -225,4 +235,59 @@ class UserSettingModel(Base):
     __table_args__ = (
         CheckConstraint("length(trim(key)) > 0", name="ck_user_settings_key_not_blank"),
         CheckConstraint("json_valid(value_json) = 1", name="ck_user_settings_value_json_valid"),
+    )
+
+
+class DocumentSourceModel(Base):
+    """Persisted metadata for a user-selected local document in the Knowledge Base."""
+
+    __tablename__ = "document_sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_document_id)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    source_path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    file_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    modified_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    indexed_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    ingestion_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    extraction_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    chunks: Mapped[list["DocumentChunkModel"]] = relationship(
+        "DocumentChunkModel",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (Index("idx_document_sources_indexed_at", "indexed_at"),)
+
+
+class DocumentChunkModel(Base):
+    """Persisted bounded text chunk belonging to a DocumentSourceModel."""
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_chunk_id)
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    section_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    document: Mapped["DocumentSourceModel"] = relationship(
+        "DocumentSourceModel", back_populates="chunks"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_doc_idx"),
+        Index("idx_document_chunks_document_id", "document_id"),
     )

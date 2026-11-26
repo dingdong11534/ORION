@@ -4,6 +4,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable, Iterator, Sequence
+from typing import Any
 
 from orion.application.contracts import (
     AssistantResponse,
@@ -19,6 +20,7 @@ from orion.application.contracts import (
     ThinkingDelta,
     generate_request_id,
 )
+from orion.application.knowledge.retrieval import DocumentRetrievalService, build_rag_prompt
 from orion.application.ports import (
     ConversationNotFoundError,
     ConversationStore,
@@ -47,10 +49,12 @@ class AssistantService:
         settings_store: SettingsStore | None = None,
         max_history_messages: int | None = None,
         max_history_chars: int = 2400,
+        retrieval_service: DocumentRetrievalService | None = None,
     ) -> None:
         self._model_provider = model_provider
         self._conversation_store = conversation_store
         self._settings_store = settings_store
+        self._retrieval_service = retrieval_service
         if max_history_messages is None:
             env_limit = os.environ.get("ORION_MAX_HISTORY_MESSAGES", "12").strip()
             try:
@@ -500,6 +504,8 @@ class AssistantService:
         conversation_id: str | None = None,
         on_chunk: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
+        selected_document_ids: Sequence[str] | None = None,
+        on_references: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> Iterator[str]:
         """Process incoming user message incrementally, yielding chunks and persisting once complete."""
         # A. Receive request & validate
@@ -570,13 +576,51 @@ class AssistantService:
             # Snapshot thinking preference at request start so mid-request toggles never alter it
             snapshot_think = self.get_show_thinking() and self.supports_thinking()
 
-            # D. Stream response chunks without holding open database transactions
+            # D. Optional local RAG retrieval when user explicitly selected knowledge sources
+            model_prompt = req.content
+            clean_doc_ids = [d for d in (selected_document_ids or ()) if d and d.strip()]
+            if clean_doc_ids and self._retrieval_service is not None:
+                retrieval = self._retrieval_service.retrieve(req.content, clean_doc_ids)
+                if on_references is not None:
+                    refs_payload = [
+                        {
+                            "chunk_id": p.chunk_id,
+                            "document_id": p.document_id,
+                            "display_name": p.display_name,
+                            "source_path": p.source_path,
+                            "chunk_index": p.chunk_index,
+                            "page_number": p.page_number if p.page_number is not None else -1,
+                            "section_title": p.section_title or "",
+                            "excerpt": p.excerpt,
+                            "is_selected_source": p.is_selected_source,
+                        }
+                        for p in retrieval.passages
+                    ]
+                    on_references(refs_payload)
+                if not retrieval.has_evidence:
+                    no_ev_msg = (
+                        "Insufficient evidence: no relevant passages were found in the "
+                        "selected knowledge sources for this question."
+                    )
+                    accumulated_chunks.append(no_ev_msg)
+                    if on_chunk is not None:
+                        on_chunk(no_ev_msg)
+                    yield no_ev_msg
+                    self._conversation_store.complete_request(
+                        conversation_id=cid,
+                        client_request_id=req.client_request_id,
+                        response_content=no_ev_msg,
+                    )
+                    return
+                model_prompt = build_rag_prompt(req.content, retrieval)
+
+            # Stream response chunks without holding open database transactions
             if cancellation_token.is_cancelled:
                 raise OllamaCancelledError("Generation cancelled by user.")
 
             if hasattr(self._model_provider, "stream_events"):
                 for event in self._model_provider.stream_events(
-                    prompt=req.content,
+                    prompt=model_prompt,
                     history=chat_history,
                     cancellation_token=cancellation_token,
                     think=snapshot_think,
@@ -596,13 +640,13 @@ class AssistantService:
             else:
                 if hasattr(self._model_provider, "stream_response"):
                     chunk_iter = self._model_provider.stream_response(
-                        prompt=req.content,
+                        prompt=model_prompt,
                         history=chat_history,
                         cancellation_token=cancellation_token,
                     )
                 else:
                     full_text = self._model_provider.generate_response(
-                        prompt=req.content,
+                        prompt=model_prompt,
                         history=chat_history,
                     )
                     chunk_iter = iter([full_text])

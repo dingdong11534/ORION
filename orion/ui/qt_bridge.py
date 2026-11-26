@@ -2,20 +2,26 @@
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import Property, QObject, QThreadPool, Signal, Slot
+from PySide6.QtCore import Property, QObject, QThreadPool, QUrl, Signal, Slot
 
 from orion.application.assistant_service import AssistantService
 from orion.application.contracts import (
     AssistantResponse,
     AssistantServiceInterruptedError,
+    CancellationToken,
     ChatMessage,
     ConversationSummary,
     MessageStatus,
     PersistedMessage,
     generate_request_id,
 )
+from orion.application.knowledge.retrieval import KnowledgeService
+from orion.application.tools.contracts import ExecutionStatus
+from orion.application.tools.router import RouterDisposition, ToolRouter
+from orion.application.tools.workspace_browser import WorkspaceBrowserService
 from orion.infrastructure.workers import Worker, WorkerSignals
 
 if TYPE_CHECKING:
@@ -81,6 +87,22 @@ class OrionBridge(QObject):
         str, str, int, float, bool, str
     )  # (execution_id, status, exit_code, duration_ms, truncated, error_message)
 
+    # User-initiated workspace browser signals
+    workspaceDirectoryLoaded = Signal(str, list, int, bool, str)
+    workspaceFileLoaded = Signal(str, str, int, bool, str)
+    workspaceToolError = Signal(str, str, str)
+    workspaceToolBusyChanged = Signal(bool)
+    workspaceToolsAvailableChanged = Signal(bool)
+
+    # Local Knowledge Base & RAG signals
+    knowledgeSourcesLoaded = Signal(list)
+    knowledgeImportCompleted = Signal(int, list)
+    knowledgeSourceRemoved = Signal(str)
+    knowledgeError = Signal(str)
+    knowledgeBusyChanged = Signal(bool)
+    knowledgeProgress = Signal(dict)
+    responseReferences = Signal(str, list)
+
     def __init__(
         self,
         assistant_service: AssistantService,
@@ -88,6 +110,9 @@ class OrionBridge(QObject):
         parent: QObject | None = None,
         approval_broker: "ApprovalBroker | None" = None,
         execution_manager: "ExecutionManager | None" = None,
+        tool_router: ToolRouter | None = None,
+        workspace_root: Path | None = None,
+        knowledge_service: KnowledgeService | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
@@ -99,6 +124,22 @@ class OrionBridge(QObject):
         if self._execution_manager is not None:
             self._execution_manager.set_output_listener(self._on_execution_output_chunk)
             self._execution_manager.set_lifecycle_listener(self._on_execution_lifecycle)
+
+        self._workspace_root: Path | None = workspace_root
+        self._workspace_browser: WorkspaceBrowserService | None = None
+        self._workspace_busy: bool = False
+        self._active_workspace_workers: dict[str, Worker] = {}
+        self._cancelled_workspace_ids: set[str] = set()
+        self._current_workspace_request_id: str | None = None
+        if tool_router is not None:
+            self.set_workspace_tools(tool_router, workspace_root)
+
+        self._knowledge_service: KnowledgeService | None = knowledge_service
+        self._knowledge_busy: bool = False
+        self._active_knowledge_workers: dict[str, Worker] = {}
+        self._knowledge_cancel_token: CancellationToken | None = None
+        self._knowledge_pool = QThreadPool(self)
+        self._knowledge_pool.setMaxThreadCount(1)
 
         if thread_pool is not None:
             self._thread_pool = thread_pool
@@ -152,6 +193,386 @@ class OrionBridge(QObject):
             return bool(self._service.is_simulated_provider())
         return False
 
+    @Property(str, notify=workspaceToolsAvailableChanged)
+    def workspaceRoot(self) -> str:
+        """Expose the configured workspace root path to QML."""
+        return str(self._workspace_root) if self._workspace_root is not None else ""
+
+    @Property(bool, notify=workspaceToolsAvailableChanged)
+    def workspaceToolsAvailable(self) -> bool:
+        """Return True when user-initiated workspace tools are configured."""
+        return self._workspace_browser is not None
+
+    @Property(bool, notify=workspaceToolBusyChanged)
+    def workspaceToolBusy(self) -> bool:
+        """Return True while a user-initiated workspace tool request is running."""
+        return self._workspace_busy
+
+    @Property(bool, constant=True)
+    def knowledgeAvailable(self) -> bool:
+        """Return True when local Knowledge Base service is configured."""
+        return self._knowledge_service is not None
+
+    @Property(bool, notify=knowledgeBusyChanged)
+    def knowledgeBusy(self) -> bool:
+        """Return True while a knowledge import/reindex/remove operation is running."""
+        return self._knowledge_busy
+
+    @Property(str, constant=True)
+    def supportedKnowledgeFormats(self) -> str:
+        """Return human-readable summary of supported Knowledge Base formats."""
+        return (
+            "Text/Code (.txt .md .rst .log .py .js .ts .go .rs .c .cpp .java .sql .sh .tex), "
+            "Docs (.pdf .docx .epub .html .pptx .xlsx .xlsm .csv .tsv .rtf .odt .ods .xml .json .ipynb)"
+        )
+
+    @Slot()
+    def cancelKnowledgeIngestion(self) -> None:
+        """Cancel the active knowledge ingestion task, if any."""
+        if self._knowledge_cancel_token is not None:
+            self._knowledge_cancel_token.cancel()
+
+    def _set_knowledge_busy(self, busy: bool) -> None:
+        if self._knowledge_busy != busy:
+            self._knowledge_busy = busy
+            self.knowledgeBusyChanged.emit(busy)
+
+    @staticmethod
+    def _source_to_dict(s: Any) -> dict[str, Any]:
+        return {
+            "id": s.id,
+            "display_name": s.display_name,
+            "source_path": s.source_path,
+            "file_type": s.file_type,
+            "file_size": s.file_size,
+            "chunk_count": s.chunk_count,
+            "ingestion_status": s.ingestion_status.value
+            if hasattr(s.ingestion_status, "value")
+            else str(s.ingestion_status),
+            "indexed_at": s.indexed_at.isoformat(),
+            "error_message": s.error_message or "",
+        }
+
+    @staticmethod
+    def _to_local_path(url_or_path: Any) -> Path:
+        if isinstance(url_or_path, QUrl):
+            return Path(url_or_path.toLocalFile() or url_or_path.toString())
+        raw = str(url_or_path).strip()
+        if raw.startswith("file://"):
+            return Path(QUrl(raw).toLocalFile())
+        return Path(raw)
+
+    def _run_knowledge_worker(
+        self,
+        fn: Callable[[CancellationToken], tuple[str, Any]],
+    ) -> None:
+        if self._is_shutting_down:
+            self.knowledgeError.emit("Application is shutting down.")
+            return
+        if self._knowledge_service is None:
+            self.knowledgeError.emit("Knowledge Base service is not configured.")
+            return
+
+        req_id = generate_request_id()
+        token = CancellationToken()
+        self._knowledge_cancel_token = token
+        signals = WorkerSignals(parent=self)
+        worker = Worker(lambda: fn(token), signals=signals)
+        self._active_knowledge_workers[req_id] = worker
+        self._set_knowledge_busy(True)
+
+        def _on_res(res: object) -> None:
+            if self._is_shutting_down or not isinstance(res, tuple) or len(res) != 2:
+                return
+            op_name, data = res
+            if op_name == "list":
+                self.knowledgeSourcesLoaded.emit(data)
+            elif op_name == "import":
+                count, errs, sources = data
+                self.knowledgeImportCompleted.emit(count, errs)
+                self.knowledgeSourcesLoaded.emit(sources)
+            elif op_name == "remove":
+                doc_id, sources = data
+                self.knowledgeSourceRemoved.emit(doc_id)
+                self.knowledgeSourcesLoaded.emit(sources)
+
+        def _on_err(err: str) -> None:
+            if not self._is_shutting_down:
+                self.knowledgeError.emit(err)
+
+        def _on_fin() -> None:
+            if self._knowledge_cancel_token is token:
+                self._knowledge_cancel_token = None
+            self._active_knowledge_workers.pop(req_id, None)
+            if not self._active_knowledge_workers:
+                self._set_knowledge_busy(False)
+
+        worker.signals.result.connect(_on_res)
+        worker.signals.error.connect(_on_err)
+        worker.signals.finished.connect(_on_fin)
+        self._knowledge_pool.start(worker)
+
+    @Slot()
+    def loadKnowledgeSources(self) -> None:
+        """Load all persisted knowledge sources asynchronously."""
+        svc = self._knowledge_service
+
+        def _task(_token: CancellationToken) -> tuple[str, Any]:
+            assert svc is not None
+            return ("list", [self._source_to_dict(s) for s in svc.list_sources()])
+
+        self._run_knowledge_worker(_task)
+
+    @Slot(list)
+    def importKnowledgeFiles(self, file_urls_or_paths: list) -> None:
+        """Import one or more user-selected files into the local Knowledge Base."""
+        svc = self._knowledge_service
+        paths = [self._to_local_path(p) for p in (file_urls_or_paths or [])]
+
+        def _task(token: CancellationToken) -> tuple[str, Any]:
+            assert svc is not None
+            count = 0
+            errors: list[str] = []
+            total = len(paths)
+            for idx, p in enumerate(paths, start=1):
+                if token.is_cancelled:
+                    errors.append("Import cancelled by user.")
+                    break
+                try:
+                    svc.import_file(
+                        p,
+                        cancel_token=token,
+                        on_progress=lambda info: self.knowledgeProgress.emit(info),
+                    )
+                    count += 1
+                    self.knowledgeProgress.emit(
+                        {
+                            "stage": "files",
+                            "display_name": p.name,
+                            "files_total": total,
+                            "files_completed": idx,
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{p.name}: {exc}")
+            sources = [self._source_to_dict(s) for s in svc.list_sources()]
+            return ("import", (count, errors, sources))
+
+        self._run_knowledge_worker(_task)
+
+    @Slot(str)
+    def importKnowledgeFolder(self, folder_url_or_path: str) -> None:
+        """Import supported files from an explicitly user-selected folder."""
+        svc = self._knowledge_service
+        folder = self._to_local_path(folder_url_or_path)
+
+        def _task(token: CancellationToken) -> tuple[str, Any]:
+            assert svc is not None
+            from orion.infrastructure.knowledge.extractor import SUPPORTED_EXTENSIONS
+
+            recs, errors, stats = svc.import_folder(
+                folder,
+                supported_extensions=SUPPORTED_EXTENSIONS,
+                cancel_token=token,
+                on_progress=lambda info: self.knowledgeProgress.emit(info),
+            )
+            self.knowledgeProgress.emit(
+                {
+                    "stage": "folder_done",
+                    "display_name": folder.name,
+                    "files_total": stats["total"],
+                    "files_completed": stats["completed"],
+                    "files_skipped": stats["skipped"],
+                    "files_failed": stats["failed"],
+                }
+            )
+            sources = [self._source_to_dict(s) for s in svc.list_sources()]
+            return ("import", (len(recs), errors, sources))
+
+        self._run_knowledge_worker(_task)
+
+    @Slot(str)
+    def reindexKnowledgeSource(self, document_id: str) -> None:
+        """Re-index an existing knowledge source from its source_path."""
+        svc = self._knowledge_service
+
+        def _task(token: CancellationToken) -> tuple[str, Any]:
+            assert svc is not None
+            errors: list[str] = []
+            count = 0
+            try:
+                svc.reindex_source(document_id, cancel_token=token)
+                count = 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+            sources = [self._source_to_dict(s) for s in svc.list_sources()]
+            return ("import", (count, errors, sources))
+
+        self._run_knowledge_worker(_task)
+
+    @Slot(str)
+    def removeKnowledgeSource(self, document_id: str) -> None:
+        """Remove a document source and its chunks from the Knowledge Base."""
+        svc = self._knowledge_service
+
+        def _task(_token: CancellationToken) -> tuple[str, Any]:
+            assert svc is not None
+            svc.remove_source(document_id)
+            sources = [self._source_to_dict(s) for s in svc.list_sources()]
+            return ("remove", (document_id, sources))
+
+        self._run_knowledge_worker(_task)
+
+    def set_workspace_tools(
+        self,
+        tool_router: ToolRouter,
+        workspace_root: Path | None = None,
+    ) -> None:
+        """Attach the sealed workspace ToolRouter for user-initiated inspection."""
+        self._workspace_root = workspace_root
+        conv_store = getattr(self._service, "_conversation_store", None)
+        recorder = getattr(conv_store, "record_activity_event", None)
+        self._workspace_browser = WorkspaceBrowserService(
+            router=tool_router,
+            event_recorder=recorder if callable(recorder) else None,
+        )
+        self.workspaceToolsAvailableChanged.emit(True)
+
+    def _set_workspace_busy(self, busy: bool) -> None:
+        if self._workspace_busy != busy:
+            self._workspace_busy = busy
+            self.workspaceToolBusyChanged.emit(busy)
+
+    @Slot(str)
+    def listWorkspaceDirectory(self, relative_path: str) -> None:
+        """User-initiated directory listing routed deterministically through ToolRouter."""
+        self._dispatch_workspace_tool("workspace_list_directory", relative_path)
+
+    @Slot(str)
+    def readWorkspaceFile(self, relative_path: str) -> None:
+        """User-initiated file read routed deterministically through ToolRouter."""
+        self._dispatch_workspace_tool("workspace_read_file", relative_path)
+
+    @Slot()
+    def cancelWorkspaceTool(self) -> None:
+        """Cancel the active in-flight workspace browser request, if any."""
+        if self._current_workspace_request_id is not None:
+            self._cancelled_workspace_ids.add(self._current_workspace_request_id)
+            self._current_workspace_request_id = None
+            self._set_workspace_busy(False)
+
+    def _dispatch_workspace_tool(self, tool_id: str, relative_path: str) -> None:
+        if self._is_shutting_down:
+            self.workspaceToolError.emit(tool_id, relative_path, "Application is shutting down.")
+            return
+        if self._workspace_browser is None:
+            self.workspaceToolError.emit(
+                tool_id, relative_path, "Workspace browser tools are not configured."
+            )
+            return
+
+        browser = self._workspace_browser
+        request_id = generate_request_id()
+        self._current_workspace_request_id = request_id
+        conv_id = self._service.active_conversation_id or "workspace_browser"
+
+        def _task() -> tuple[str, str, Any]:
+            if tool_id == "workspace_list_directory":
+                decision = browser.list_directory(
+                    relative_path=relative_path,
+                    client_request_id=request_id,
+                    conversation_id=conv_id,
+                )
+            else:
+                decision = browser.read_file(
+                    relative_path=relative_path,
+                    client_request_id=request_id,
+                    conversation_id=conv_id,
+                )
+            return (tool_id, relative_path, decision)
+
+        signals = WorkerSignals(parent=self)
+        worker = Worker(_task, signals=signals)
+        self._active_workspace_workers[request_id] = worker
+        self._set_workspace_busy(True)
+        worker.signals.result.connect(
+            lambda res, tid=request_id: self._handle_workspace_result(tid, res)
+        )
+        worker.signals.error.connect(
+            lambda err, tid=request_id, t=tool_id, p=relative_path: self._handle_workspace_error(
+                tid, t, p, err
+            )
+        )
+        worker.signals.finished.connect(lambda tid=request_id: self._handle_workspace_finished(tid))
+        self._thread_pool.start(worker)
+
+    @Slot(str, object)
+    def _handle_workspace_result(self, task_id: str, payload: object) -> None:
+        if self._is_shutting_down or task_id in self._cancelled_workspace_ids:
+            return
+        if not isinstance(payload, tuple) or len(payload) != 3:
+            return
+        tool_id, relative_path, decision = payload
+
+        if decision.disposition != RouterDisposition.DISPATCHED:
+            msg = decision.error_message or f"Request rejected ({decision.disposition.value})."
+            self.workspaceToolError.emit(tool_id, relative_path, msg)
+            return
+
+        result = decision.result
+        if result is None or result.status != ExecutionStatus.COMPLETED or result.output is None:
+            msg = (
+                (result.error_message if result is not None else None)
+                or decision.error_message
+                or "Workspace tool execution failed."
+            )
+            self.workspaceToolError.emit(tool_id, relative_path, msg)
+            return
+
+        output = result.output if isinstance(result.output, dict) else result.output.model_dump()
+        if tool_id == "workspace_list_directory":
+            entries = [
+                {
+                    "name": e["name"],
+                    "entry_type": e["entry_type"],
+                    "size_bytes": e.get("size_bytes") if e.get("size_bytes") is not None else -1,
+                    "is_excluded": bool(e.get("is_excluded", False)),
+                }
+                for e in output.get("entries", [])
+            ]
+            self.workspaceDirectoryLoaded.emit(
+                str(output.get("relative_path", "")),
+                entries,
+                int(output.get("total_entries", len(entries))),
+                bool(output.get("truncated", False)),
+                task_id,
+            )
+        elif tool_id == "workspace_read_file":
+            self.workspaceFileLoaded.emit(
+                str(output.get("relative_path", "")),
+                str(output.get("content", "")),
+                int(output.get("size_bytes", 0)),
+                bool(output.get("truncated", False)),
+                task_id,
+            )
+
+    @Slot(str, str, str, str)
+    def _handle_workspace_error(
+        self, task_id: str, tool_id: str, relative_path: str, error_message: str
+    ) -> None:
+        if self._is_shutting_down or task_id in self._cancelled_workspace_ids:
+            return
+        self.workspaceToolError.emit(tool_id, relative_path, error_message)
+
+    @Slot(str)
+    def _handle_workspace_finished(self, task_id: str) -> None:
+        if self._current_workspace_request_id == task_id:
+            self._current_workspace_request_id = None
+        self._cancelled_workspace_ids.discard(task_id)
+        self._active_workspace_workers.pop(task_id, None)
+        if not self._active_workspace_workers:
+            self._set_workspace_busy(False)
+
     @Slot(bool)
     def setShowThinking(self, enabled: bool) -> None:
         """Persist the Show thinking trace preference."""
@@ -188,6 +609,7 @@ class OrionBridge(QObject):
 
         worker.signals.chunk.connect(self._handle_worker_chunk)
         worker.signals.thinking.connect(self._handle_worker_thinking)
+        worker.signals.references.connect(self._handle_worker_references)
         worker.signals.result.connect(lambda res, tid=task_id: self._handle_worker_result(tid, res))
         worker.signals.error.connect(lambda err, tid=task_id: self._handle_worker_error(tid, err))
         worker.signals.finished.connect(lambda tid=task_id: self._handle_worker_finished(tid))
@@ -400,6 +822,11 @@ class OrionBridge(QObject):
     @Slot(str)
     def sendMessage(self, message: str) -> None:
         """Validate input and initiate background message processing."""
+        self.sendMessageWithSources(message, [])
+
+    @Slot(str, list)
+    def sendMessageWithSources(self, message: str, selected_document_ids: list) -> None:
+        """Validate input and initiate background message processing with optional RAG sources."""
         if self._is_shutting_down:
             self.errorOccurred.emit("Application is shutting down. Request rejected.")
             return
@@ -416,6 +843,7 @@ class OrionBridge(QObject):
         target_cid = self._service.active_conversation_id
         request_id = generate_request_id()
         self._current_request_id = request_id
+        doc_ids = [str(d) for d in (selected_document_ids or []) if str(d).strip()]
 
         def _task(signals: WorkerSignals) -> tuple[str, ...]:
             accumulated: list[str] = []
@@ -425,6 +853,8 @@ class OrionBridge(QObject):
                     client_request_id=request_id,
                     conversation_id=target_cid,
                     on_thinking=lambda t: signals.thinking.emit(request_id, t),
+                    selected_document_ids=doc_ids,
+                    on_references=lambda refs: signals.references.emit(request_id, refs),
                 ):
                     accumulated.append(chunk)
                     signals.chunk.emit(request_id, chunk)
@@ -460,6 +890,16 @@ class OrionBridge(QObject):
         if task_id in self._cancelled_request_ids:
             return
         self.thinkingChunk.emit(chunk, task_id)
+
+    @Slot(str, object)
+    def _handle_worker_references(self, task_id: str, refs: object) -> None:
+        if self._is_shutting_down:
+            return
+        if task_id not in self._active_workers:
+            return
+        if task_id in self._cancelled_request_ids:
+            return
+        self.responseReferences.emit(task_id, list(refs) if isinstance(refs, list) else [])
 
     @Slot(str, object)
     def _handle_worker_result(self, task_id: str, result: object) -> None:
@@ -573,9 +1013,13 @@ class OrionBridge(QObject):
         if not self._is_shutting_down:
             self._is_shutting_down = True
 
-            # Signal cancellation for any active generation requests (once only)
+            # Signal cancellation for any active generation or workspace requests (once only)
             if self._current_request_id is not None:
                 self._cancelled_request_ids.add(self._current_request_id)
+            if self._current_workspace_request_id is not None:
+                self._cancelled_workspace_ids.add(self._current_workspace_request_id)
+            if self._knowledge_cancel_token is not None:
+                self._knowledge_cancel_token.cancel()
             if hasattr(self._service, "cancel_all_requests"):
                 self._service.cancel_all_requests()
             if self._approval_broker is not None:
@@ -591,7 +1035,8 @@ class OrionBridge(QObject):
                     logger.debug("ExecutionManager shutdown error during bridge shutdown")
 
         drained = self._thread_pool.waitForDone(timeout_ms)
-        if not drained:
+        drained_kb = self._knowledge_pool.waitForDone(timeout_ms)
+        if not drained or not drained_kb:
             logger.warning(
                 "OrionBridge shutdown timed out with %d active worker(s) still executing.",
                 len(self._active_workers),
@@ -599,5 +1044,9 @@ class OrionBridge(QObject):
             return False
 
         self._active_workers.clear()
+        self._active_workspace_workers.clear()
+        self._active_knowledge_workers.clear()
         self._set_busy(False)
+        self._set_workspace_busy(False)
+        self._set_knowledge_busy(False)
         return True

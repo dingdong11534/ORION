@@ -33,7 +33,7 @@ from orion.ui.qt_bridge import OrionBridge
 logger = logging.getLogger(__name__)
 
 # Maintained for backward compatibility with existing tests
-_EXPECTED_ALEMBIC_REVISION = "0002"
+_EXPECTED_ALEMBIC_REVISION = "0003"
 
 
 def activate_window(engine: QQmlApplicationEngine) -> None:
@@ -202,14 +202,33 @@ def main() -> int:
                 )
                 return 1
 
+        from orion.application.knowledge.retrieval import (
+            DocumentRetrievalService,
+            KnowledgeService,
+        )
+        from orion.infrastructure.knowledge.extractor import LocalDocumentExtractor
+        from orion.infrastructure.knowledge.repository import SqliteKnowledgeStore
+
+        knowledge_store = SqliteKnowledgeStore(session_factory)
+        retrieval_service = DocumentRetrievalService(knowledge_store)
+        knowledge_service = KnowledgeService(
+            extractor=LocalDocumentExtractor(),
+            store=knowledge_store,
+            event_recorder=conversation_store.record_activity_event,
+        )
+
         assistant_service = AssistantService(
             model_provider=model_provider,
             conversation_store=conversation_store,
             settings_store=settings_store,
+            retrieval_service=retrieval_service,
         )
 
         # 8. Construct OrionBridge & coordinate graceful lifecycle
-        bridge = OrionBridge(assistant_service=assistant_service)
+        bridge = OrionBridge(
+            assistant_service=assistant_service,
+            knowledge_service=knowledge_service,
+        )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,
             bridge=bridge,
@@ -223,9 +242,10 @@ def main() -> int:
         from orion.infrastructure.tools.workspace_tools import build_workspace_tool_system
 
         workspace_root = get_configured_workspace_root()
-        tool_registry, _tool_router, _ = build_workspace_tool_system(workspace_root)
+        tool_registry, tool_router, _ = build_workspace_tool_system(workspace_root)
         execution_manager = ExecutionManager(workspace_root=workspace_root)
         bridge.set_execution_manager(execution_manager)
+        bridge.set_workspace_tools(tool_router, workspace_root)
         logger.info(
             "Sealed tool registry with %d tools for workspace '%s'",
             len(tool_registry),
