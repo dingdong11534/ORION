@@ -3,6 +3,8 @@
 import gc
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -97,7 +99,7 @@ def test_ollama_think_disabled_and_enabled_payloads():
     assert "".join(e.text for e in events_off if isinstance(e, TextDelta)) == "Hello world"
 
     assert captured_payloads[1]["think"] is True
-    assert captured_payloads[1]["options"]["num_predict"] >= 1024
+    assert captured_payloads[1]["options"]["num_predict"] == provider.num_predict_thinking
     assert [e.text for e in events_on if isinstance(e, ThinkingDelta)] == ["step 1 ", "step 2"]
     assert [e.text for e in events_on if isinstance(e, TextDelta)] == ["Hello ", "world"]
     assert isinstance(events_on[-1], GenerationCompleted)
@@ -250,7 +252,7 @@ def test_toggle_mid_request_does_not_alter_active_request(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_qml_thinking_toggle_collapsible_display_and_separation(tmp_path: Path):
+def _run_qml_thinking_ui_check(tmp_path: Path) -> None:
     """Verify QML Show thinking toggle, unsupported model state, collapse/expand, plain text, and separation."""
     conv_store, settings_store, db_engine = _make_stores(tmp_path)
     provider = FakeModelProvider(
@@ -262,8 +264,6 @@ def test_qml_thinking_toggle_collapsible_display_and_separation(tmp_path: Path):
     bridge = OrionBridge(assistant_service=svc)
 
     app = QGuiApplication.instance() or QGuiApplication(["-platform", "offscreen"])
-    gc.collect()
-    app.processEvents()
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("orion", bridge)
     qml_file = Path(__file__).parent.parent / "orion" / "ui" / "qml" / "Main.qml"
@@ -277,8 +277,10 @@ def test_qml_thinking_toggle_collapsible_display_and_separation(tmp_path: Path):
 
     toggle = root.findChild(QObject, "showThinkingToggle")
     assert toggle is not None
+    assert toggle.property("visible") is True
     assert toggle.property("enabled") is True
     assert toggle.property("checked") is False
+    assert toggle.property("text") == "Thinking Mode"
 
     # Enable Show thinking via bridge slot -> persists & updates QML
     bridge.setShowThinking(True)
@@ -299,23 +301,69 @@ def test_qml_thinking_toggle_collapsible_display_and_separation(tmp_path: Path):
         time.sleep(0.01)
     app.processEvents()
 
-    # Verify thinkingText and text are stored separately in chatModel and collapsible UI is present
+    # Verify thinkingText and text are stored separately in chatModel and auto-expanded during thinking
     assert chat_model.property("count") >= 2
     asst_item = chat_model.get(chat_model.property("count") - 1).toVariant()
     assert asst_item.property("thinkingText") == "Step A\nStep B"
     assert asst_item.property("text") == "Clean final answer"
-    assert asst_item.property("thinkingExpanded") is False
+    assert asst_item.property("thinkingExpanded") is True
     assert asst_item.property("isThinkingActive") is False
+    assert asst_item.property("isAnsweringActive") is False
 
-    # Verify plain-text rendering & collapsible toggle in Main.qml
+    # Verify plain-text rendering, bounded card geometry, wrapping, and no simulated-mode label leak
     qml_src = qml_file.read_text()
     assert 'objectName: "thinkingToggleHeader"' in qml_src
     assert 'objectName: "thinkingPlainText"' in qml_src
     assert "textFormat: Text.PlainText" in qml_src
+    assert "wrapMode: Text.WordWrap" in qml_src
+    assert "contentWidth: availableWidth" in qml_src
 
-    # Check bounding & truncation on direct thinkingChunk
+    provider_status = root.findChild(QObject, "providerStatusText")
+    provider_footer = root.findChild(QObject, "providerFooterText")
+    assert provider_status is not None and provider_status.property("text") == "Simulation Mode"
+    assert provider_footer is not None and "Simulation Mode" in provider_footer.property("text")
+
+    import PySide6.QtQuick  # noqa: F401 - registers QQuickItem* meta-type converter
+
+    chat_list = root.findChild(QObject, "chatList")
+    assert chat_list is not None
+    chat_list.forceLayout()
+    app.processEvents()
+    content_item = chat_list.property("contentItem")
+    items = content_item.childItems()
+    thinking_cards = []
+    for ch in items:
+        try:
+            c = ch.findChild(QObject, "thinkingCard")
+            if c is not None and c.property("width") > 0:
+                thinking_cards.append((ch, c))
+        except RuntimeError:
+            continue
+    assert thinking_cards
+    _owner, thinking_card = thinking_cards[-1]
+    thinking_text_item = thinking_card.findChild(QObject, "thinkingPlainText")
+    assert thinking_card.property("clip") is True
+    assert thinking_text_item is not None
+    assert thinking_card.property("width") > 300
+    assert thinking_text_item.property("width") <= thinking_card.property("width")
+
+    # Resize window and verify thinking card width adapts dynamically
+    old_card_w = thinking_card.property("width")
+    root.setProperty("width", 1400)
+    app.processEvents()
+    assert thinking_card.property("width") > old_card_w
+
+    # Verify stale requestId chunks are ignored, while matching requestId chunks are bounded & truncated
     asst_item.setProperty("status", "pending")
-    bridge.thinkingChunk.emit("Z" * 40000, "req-x")
+    active_req_id = asst_item.property("requestId")
+    bridge.thinkingChunk.emit("STALE", "stale-other-request")
+    app.processEvents()
+    assert (
+        chat_model.get(chat_model.property("count") - 1).toVariant().property("thinkingText")
+        == "Step A\nStep B"
+    )
+
+    bridge.thinkingChunk.emit("Z" * 40000, active_req_id)
     app.processEvents()
     asst_after = chat_model.get(chat_model.property("count") - 1).toVariant()
     assert len(asst_after.property("thinkingText")) == 32768
@@ -334,3 +382,23 @@ def test_qml_thinking_toggle_collapsible_display_and_separation(tmp_path: Path):
     del engine
     gc.collect()
     db_engine.dispose()
+
+
+def test_qml_thinking_toggle_collapsible_display_and_separation(tmp_path: Path):
+    """Run QML Thinking UI verification in an isolated Qt process to avoid cross-test QV4 heap corruption."""
+    res = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                "from tests.test_thinking_trace import _run_qml_thinking_ui_check; "
+                f"_run_qml_thinking_ui_check(Path({str(tmp_path)!r}))"
+            ),
+        ],
+        cwd=str(Path(__file__).parent.parent),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}"

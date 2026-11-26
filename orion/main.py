@@ -109,14 +109,14 @@ def check_database_migration(
 def create_model_provider() -> ModelProvider:
     """Create and return configured ModelProvider based on environment variables.
 
-    Defaults to OllamaModelProvider with qwen2.5:1.5b. Does not connect to the
+    Defaults to OllamaModelProvider with qwen3:1.7b. Does not connect to the
     server on startup; network connectivity is deferred until inference requests.
     """
     provider_type = os.environ.get("ORION_MODEL_PROVIDER", "ollama").strip().lower()
 
     if provider_type == "ollama":
         base_url = os.environ.get("ORION_OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
-        model_name = os.environ.get("ORION_OLLAMA_MODEL", "qwen2.5:1.5b").strip()
+        model_name = os.environ.get("ORION_OLLAMA_MODEL", "qwen3:1.7b").strip()
         think_env = os.environ.get("ORION_OLLAMA_THINK", "false").strip().lower()
         think = think_env in ("true", "1", "yes")
         return OllamaModelProvider(base_url=base_url, model_name=model_name, think=think)
@@ -181,6 +181,26 @@ def main() -> int:
         except ValueError as exc:
             print(f"ORION CONFIGURATION ERROR:\n{exc}", file=sys.stderr)
             return 1
+
+        if os.environ.get("ORION_MODEL_PROVIDER", "").strip().lower() == "ollama" and isinstance(
+            model_provider, OllamaModelProvider
+        ):
+            import urllib.request
+
+            try:
+                with urllib.request.urlopen(
+                    f"{model_provider.base_url}/api/tags", timeout=3.0
+                ) as r:
+                    r.read()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"ORION STARTUP ERROR:\n"
+                    f"ORION_MODEL_PROVIDER=ollama was requested, but Ollama at "
+                    f"{model_provider.base_url} is unavailable: {exc}\n"
+                    f"Start Ollama ('ollama serve') and retry.",
+                    file=sys.stderr,
+                )
+                return 1
 
         assistant_service = AssistantService(
             model_provider=model_provider,

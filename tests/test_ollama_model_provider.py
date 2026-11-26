@@ -147,7 +147,7 @@ def test_correct_non_streaming_payload():
     payload = json.loads(req.data.decode("utf-8"))
     assert payload["stream"] is False
     assert payload["think"] is False
-    assert payload["keep_alive"] == "30s"
+    assert payload["keep_alive"] == "5m"
 
 
 def test_default_think_parameter_is_false():
@@ -473,7 +473,7 @@ def test_stream_response_payload_structure():
     assert payload["model"] == "qwen3:1.7b"
     assert payload["stream"] is True
     assert payload["think"] is False
-    assert payload["keep_alive"] == "30s"
+    assert payload["keep_alive"] == "5m"
     assert payload["options"]["num_ctx"] == 4096
     assert payload["options"]["num_predict"] == 128
 

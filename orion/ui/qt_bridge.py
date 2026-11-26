@@ -138,6 +138,20 @@ class OrionBridge(QObject):
             return bool(self._service.supports_thinking())
         return False
 
+    @Property(str, constant=True)
+    def providerDisplay(self) -> str:
+        """Expose active runtime provider and model name to QML."""
+        if hasattr(self._service, "get_provider_display"):
+            return str(self._service.get_provider_display())
+        return "Ollama"
+
+    @Property(bool, constant=True)
+    def isSimulatedProvider(self) -> bool:
+        """Expose whether the active provider is simulated (FakeModelProvider)."""
+        if hasattr(self._service, "is_simulated_provider"):
+            return bool(self._service.is_simulated_provider())
+        return False
+
     @Slot(bool)
     def setShowThinking(self, enabled: bool) -> None:
         """Persist the Show thinking trace preference."""
@@ -186,6 +200,8 @@ class OrionBridge(QObject):
         """Asynchronously load conversations and active history on startup."""
         if self._is_shutting_down:
             return
+        if hasattr(self._service, "supports_thinking"):
+            self.thinkingSupportedChanged.emit(bool(self._service.supports_thinking()))
 
         def _task() -> tuple[str, list[dict[str, Any]], str, list[dict[str, Any]]]:
             convs = [_conv_to_dict(c) for c in self._service.list_conversations()]

@@ -68,6 +68,9 @@ class OllamaModelProvider:
         num_ctx: int = 2048,
         num_predict: int = 256,
         think: bool = False,
+        num_predict_fast: int | None = None,
+        num_predict_thinking: int = 1024,
+        keep_alive: str = "5m",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name.strip()
@@ -75,7 +78,31 @@ class OllamaModelProvider:
         self.num_ctx = num_ctx
         self.num_predict = num_predict
         self.think = think
+        self.num_predict_fast = num_predict_fast
+        self.num_predict_thinking = num_predict_thinking
+        self.keep_alive = keep_alive
         self._supports_thinking_cache: bool | None = None
+        self.last_performance_metrics: dict[str, Any] | None = None
+
+    def _resolve_num_predict(self, effective_think: bool) -> int:
+        """Return token output budget for the active response profile."""
+        if effective_think:
+            return self.num_predict_thinking
+        return self.num_predict_fast if self.num_predict_fast is not None else self.num_predict
+
+    @staticmethod
+    def _extract_performance_metrics(record: dict[str, Any]) -> dict[str, Any]:
+        """Extract safe numeric/status Ollama timing metadata without prompt or secret data."""
+        keys = (
+            "load_duration",
+            "prompt_eval_count",
+            "prompt_eval_duration",
+            "eval_count",
+            "eval_duration",
+            "total_duration",
+            "done_reason",
+        )
+        return {k: record[k] for k in keys if k in record}
 
     def supports_thinking(self) -> bool:
         """Query Ollama /api/show to check whether the configured model supports thinking."""
@@ -220,10 +247,10 @@ class OllamaModelProvider:
             "messages": messages,
             "stream": False,
             "think": self.think,
-            "keep_alive": "30s",
+            "keep_alive": self.keep_alive,
             "options": {
                 "num_ctx": self.num_ctx,
-                "num_predict": self.num_predict,
+                "num_predict": self._resolve_num_predict(self.think),
             },
         }
 
@@ -278,6 +305,7 @@ class OllamaModelProvider:
         if not isinstance(content, str) or not content.strip():
             raise OllamaResponseError("Ollama API returned an empty assistant response.")
 
+        self.last_performance_metrics = self._extract_performance_metrics(data)
         return content
 
     def stream_response(
@@ -308,7 +336,7 @@ class OllamaModelProvider:
             raise OllamaCancelledError("Generation was cancelled before starting.")
 
         effective_think = bool(self.think if think is None else think)
-        effective_num_predict = max(self.num_predict, 1024) if effective_think else self.num_predict
+        effective_num_predict = self._resolve_num_predict(effective_think)
 
         messages: list[dict[str, str]] = []
 
@@ -333,7 +361,7 @@ class OllamaModelProvider:
             "messages": messages,
             "stream": True,
             "think": effective_think,
-            "keep_alive": "30s",
+            "keep_alive": self.keep_alive,
             "options": {
                 "num_ctx": self.num_ctx,
                 "num_predict": effective_num_predict,
@@ -446,6 +474,7 @@ class OllamaModelProvider:
                     if record.get("done") is True:
                         done_received = True
                         done_reason = str(record.get("done_reason") or "stop")
+                        self.last_performance_metrics = self._extract_performance_metrics(record)
                         break
 
             if cancellation_token and cancellation_token.is_cancelled:

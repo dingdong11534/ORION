@@ -18,6 +18,8 @@ ApplicationWindow {
     readonly property bool busy: (typeof orion !== "undefined" && orion !== null) ? orion.isBusy : false
     readonly property bool showThinking: (typeof orion !== "undefined" && orion !== null) ? orion.showThinking : false
     readonly property bool thinkingSupported: (typeof orion !== "undefined" && orion !== null) ? orion.thinkingSupported : false
+    readonly property string providerDisplay: (typeof orion !== "undefined" && orion !== null) ? orion.providerDisplay : "Ollama · qwen3:1.7b"
+    readonly property bool isSimulatedProvider: (typeof orion !== "undefined" && orion !== null) ? orion.isSimulatedProvider : false
     readonly property int maxThinkingChars: 32768
     property string activeConversationId: (typeof orion !== "undefined" && orion !== null) ? orion.activeConversationId : ""
     property bool isInitializing: true
@@ -89,9 +91,12 @@ ApplicationWindow {
             text: message,
             status: "completed",
             isError: false,
+            requestId: "",
             thinkingText: "",
             thinkingExpanded: false,
+            userCollapsedThinking: false,
             isThinkingActive: false,
+            isAnsweringActive: false,
             thinkingTruncated: false
         })
 
@@ -101,9 +106,12 @@ ApplicationWindow {
             text: "",
             status: "pending",
             isError: false,
+            requestId: "",
             thinkingText: "",
             thinkingExpanded: false,
+            userCollapsedThinking: false,
             isThinkingActive: false,
+            isAnsweringActive: false,
             thinkingTruncated: false
         })
 
@@ -162,9 +170,12 @@ ApplicationWindow {
                     text: displayText || "",
                     status: msg.status,
                     isError: isErr,
+                    requestId: "",
                     thinkingText: "",
                     thinkingExpanded: false,
+                    userCollapsedThinking: false,
                     isThinkingActive: false,
+                    isAnsweringActive: false,
                     thinkingTruncated: false
                 })
             }
@@ -263,8 +274,17 @@ ApplicationWindow {
                 let lastIdx = chatModel.count - 1
                 let lastItem = chatModel.get(lastIdx)
                 if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
+                    if (lastItem.requestId && requestId && lastItem.requestId !== requestId)
+                        return
+                    if (!lastItem.requestId && requestId) {
+                        chatModel.setProperty(lastIdx, "requestId", requestId)
+                    }
                     chatModel.setProperty(lastIdx, "isThinkingActive", true)
+                    chatModel.setProperty(lastIdx, "isAnsweringActive", false)
                     let cur = lastItem.thinkingText || ""
+                    if (!cur && !lastItem.userCollapsedThinking) {
+                        chatModel.setProperty(lastIdx, "thinkingExpanded", true)
+                    }
                     let rem = root.maxThinkingChars - cur.length
                     if (rem > 0) {
                         let toAdd = chunk.length > rem ? chunk.slice(0, rem) : chunk
@@ -284,7 +304,13 @@ ApplicationWindow {
                 let lastIdx = chatModel.count - 1
                 let lastItem = chatModel.get(lastIdx)
                 if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
+                    if (lastItem.requestId && requestId && lastItem.requestId !== requestId)
+                        return
+                    if (!lastItem.requestId && requestId) {
+                        chatModel.setProperty(lastIdx, "requestId", requestId)
+                    }
                     chatModel.setProperty(lastIdx, "isThinkingActive", false)
+                    chatModel.setProperty(lastIdx, "isAnsweringActive", true)
                     let currentText = lastItem.text || ""
                     chatModel.setProperty(lastIdx, "text", currentText + chunk)
                     chatList.positionViewAtEnd()
@@ -299,6 +325,7 @@ ApplicationWindow {
                 let lastItem = chatModel.get(lastIdx)
                 if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
                     chatModel.setProperty(lastIdx, "isThinkingActive", false)
+                    chatModel.setProperty(lastIdx, "isAnsweringActive", false)
                     chatModel.setProperty(lastIdx, "text", replyText)
                     chatModel.setProperty(lastIdx, "status", "completed")
                     Qt.callLater(function() {
@@ -313,9 +340,12 @@ ApplicationWindow {
                 text: replyText,
                 status: "completed",
                 isError: false,
+                requestId: "",
                 thinkingText: "",
                 thinkingExpanded: false,
+                userCollapsedThinking: false,
                 isThinkingActive: false,
+                isAnsweringActive: false,
                 thinkingTruncated: false
             })
 
@@ -329,7 +359,11 @@ ApplicationWindow {
                 let lastIdx = chatModel.count - 1
                 let lastItem = chatModel.get(lastIdx)
                 if (lastItem.role === "assistant" && (lastItem.status === "pending" || !lastItem.isError)) {
+                    if (lastItem.requestId && requestId && lastItem.requestId !== requestId)
+                        return
                     let displayText = partialText && partialText.length > 0 ? partialText : "Request was interrupted. A retry must use a new client_request_id."
+                    chatModel.setProperty(lastIdx, "isThinkingActive", false)
+                    chatModel.setProperty(lastIdx, "isAnsweringActive", false)
                     chatModel.setProperty(lastIdx, "text", displayText)
                     chatModel.setProperty(lastIdx, "status", "interrupted")
                     chatModel.setProperty(lastIdx, "isError", true)
@@ -344,7 +378,14 @@ ApplicationWindow {
                 role: "assistant",
                 text: partialText && partialText.length > 0 ? partialText : "Request was interrupted. A retry must use a new client_request_id.",
                 status: "interrupted",
-                isError: true
+                isError: true,
+                requestId: requestId || "",
+                thinkingText: "",
+                thinkingExpanded: false,
+                userCollapsedThinking: false,
+                isThinkingActive: false,
+                isAnsweringActive: false,
+                thinkingTruncated: false
             })
 
             Qt.callLater(function() {
@@ -361,6 +402,8 @@ ApplicationWindow {
                     if (lastItem.text && lastItem.text.length > 0) {
                         errorText = lastItem.text + "\n\n[Error: " + errorMessage + "]"
                     }
+                    chatModel.setProperty(lastIdx, "isThinkingActive", false)
+                    chatModel.setProperty(lastIdx, "isAnsweringActive", false)
                     chatModel.setProperty(lastIdx, "text", errorText)
                     chatModel.setProperty(lastIdx, "status", "failed")
                     chatModel.setProperty(lastIdx, "isError", true)
@@ -375,7 +418,14 @@ ApplicationWindow {
                 role: "assistant",
                 text: "Error: " + errorMessage,
                 status: "failed",
-                isError: true
+                isError: true,
+                requestId: "",
+                thinkingText: "",
+                thinkingExpanded: false,
+                userCollapsedThinking: false,
+                isThinkingActive: false,
+                isAnsweringActive: false,
+                thinkingTruncated: false
             })
 
             Qt.callLater(function() {
@@ -623,9 +673,12 @@ ApplicationWindow {
                 }
 
                 Text {
-                    text: root.busy ? "Model: Generating (Simulated)..." : "Model: Simulated (FakeModel)"
+                    objectName: "providerStatusText"
+                    text: root.busy ? (root.providerDisplay + " · Generating...") : root.providerDisplay
                     color: "#85877C"
                     font.pixelSize: 11
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
                 }
             }
         }
@@ -768,6 +821,7 @@ ApplicationWindow {
                     // 3. Active Chat ListView
                     ListView {
                         id: chatList
+                        objectName: "chatList"
                         anchors.fill: parent
                         clip: true
                         spacing: 12
@@ -786,11 +840,14 @@ ApplicationWindow {
 
                                 Rectangle {
                                     id: bubble
+                                    readonly property bool hasThinkingSection: model.role === "assistant" && Boolean((model.thinkingText && model.thinkingText.length > 0) || model.isThinkingActive)
 
-                                    width: Math.min(
-                                        chatList.width * 0.78,
-                                        Math.max(120, bubbleContent.implicitWidth + 34)
-                                    )
+                                    width: hasThinkingSection
+                                        ? Math.max(120, chatList.width * 0.78)
+                                        : Math.min(
+                                            chatList.width * 0.78,
+                                            Math.max(120, bubbleContent.implicitWidth + 34)
+                                        )
                                     height: bubbleContent.implicitHeight + 24
                                     radius: 15
 
@@ -810,7 +867,7 @@ ApplicationWindow {
                                         id: bubbleContent
                                         x: 17
                                         y: 12
-                                        width: Math.min(implicitWidth, chatList.width * 0.78 - 34)
+                                        width: bubble.width - 34
                                         spacing: 4
 
                                         // Status badge for failed or interrupted messages
@@ -824,7 +881,7 @@ ApplicationWindow {
 
                                         // Collapsible Thinking Trace section (subordinate, plain-text only)
                                         ColumnLayout {
-                                            visible: model.role === "assistant" && ((model.thinkingText && model.thinkingText.length > 0) || model.isThinkingActive)
+                                            visible: model.role === "assistant" && Boolean((model.thinkingText && model.thinkingText.length > 0) || model.isThinkingActive)
                                             Layout.fillWidth: true
                                             spacing: 4
 
@@ -850,7 +907,8 @@ ApplicationWindow {
                                                     }
 
                                                     Text {
-                                                        text: model.isThinkingActive ? "Thinking..." : "Thinking"
+                                                        objectName: "thinkingStatusLabel"
+                                                        text: model.isThinkingActive ? "Thinking..." : (model.isAnsweringActive ? "Answering..." : "Thinking")
                                                         font.pixelSize: 11
                                                         font.bold: true
                                                         color: "#5E6458"
@@ -858,7 +916,7 @@ ApplicationWindow {
                                                     }
 
                                                     Text {
-                                                        visible: model.thinkingTruncated
+                                                        visible: Boolean(model.thinkingTruncated)
                                                         text: "(truncated)"
                                                         font.pixelSize: 10
                                                         color: "#B45309"
@@ -871,35 +929,61 @@ ApplicationWindow {
                                                 MouseArea {
                                                     anchors.fill: parent
                                                     onClicked: {
-                                                        chatModel.setProperty(index, "thinkingExpanded", !model.thinkingExpanded)
+                                                        const nextExpanded = !model.thinkingExpanded
+                                                        chatModel.setProperty(index, "thinkingExpanded", nextExpanded)
+                                                        chatModel.setProperty(index, "userCollapsedThinking", !nextExpanded)
                                                     }
                                                 }
                                             }
 
                                             Rectangle {
-                                                visible: model.thinkingExpanded
+                                                id: thinkingCard
+                                                objectName: "thinkingCard"
+                                                visible: Boolean(model.thinkingExpanded)
                                                 Layout.fillWidth: true
-                                                implicitHeight: Math.min(180, thinkingPlainText.implicitHeight + 14)
+                                                implicitHeight: Math.min(220, thinkingDisclaimer.implicitHeight + thinkingPlainText.implicitHeight + 28)
+                                                clip: true
                                                 radius: 8
                                                 color: "#E9E6DE"
                                                 border.width: 1
                                                 border.color: "#DCD8CE"
 
-                                                ScrollView {
+                                                ColumnLayout {
                                                     anchors.fill: parent
-                                                    anchors.margins: 7
-                                                    clip: true
-                                                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                                                    anchors.margins: 8
+                                                    spacing: 4
 
                                                     Text {
-                                                        id: thinkingPlainText
-                                                        objectName: "thinkingPlainText"
-                                                        width: parent.width
-                                                        text: model.thinkingText || ""
-                                                        wrapMode: Text.Wrap
+                                                        id: thinkingDisclaimer
+                                                        Layout.fillWidth: true
+                                                        text: "This is a model-generated reasoning trace, not a verified transcript."
+                                                        font.pixelSize: 10
+                                                        font.italic: true
+                                                        color: "#767B6E"
+                                                        wrapMode: Text.WordWrap
                                                         textFormat: Text.PlainText
-                                                        font.pixelSize: 12
-                                                        color: "#5A5F55"
+                                                    }
+
+                                                    ScrollView {
+                                                        id: thinkingScroll
+                                                        objectName: "thinkingScroll"
+                                                        Layout.fillWidth: true
+                                                        Layout.fillHeight: true
+                                                        clip: true
+                                                        contentWidth: availableWidth
+                                                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                                                        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                                                        Text {
+                                                            id: thinkingPlainText
+                                                            objectName: "thinkingPlainText"
+                                                            width: thinkingScroll.availableWidth
+                                                            text: model.thinkingText || ""
+                                                            wrapMode: Text.WordWrap
+                                                            textFormat: Text.PlainText
+                                                            font.pixelSize: 12
+                                                            color: "#5A5F55"
+                                                        }
                                                     }
                                                 }
                                             }
@@ -930,26 +1014,92 @@ ApplicationWindow {
                     }
                 }
 
-                // Thinking trace toggle bar
-                RowLayout {
+                // Thinking Mode toggle bar
+                Rectangle {
+                    id: thinkingModeBar
+                    objectName: "thinkingModeBar"
                     Layout.fillWidth: true
-                    spacing: 8
+                    Layout.preferredHeight: 38
+                    radius: 10
+                    color: (root.thinkingSupported && root.showThinking) ? "#E6ECE3" : "#F2F0EA"
+                    border.width: 1
+                    border.color: (root.thinkingSupported && root.showThinking) ? "#B8CBB9" : "#E0DDD3"
 
-                    CheckBox {
-                        id: showThinkingToggle
-                        objectName: "showThinkingToggle"
-                        checked: root.showThinking
-                        enabled: root.thinkingSupported
-                        text: root.thinkingSupported ? "Show thinking" : "Show thinking (unavailable)"
-                        font.pixelSize: 12
-                        onToggled: {
-                            if (typeof orion !== "undefined" && orion !== null) {
-                                orion.setShowThinking(checked)
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 10
+
+                        Switch {
+                            id: showThinkingToggle
+                            objectName: "showThinkingToggle"
+                            checked: root.showThinking
+                            enabled: root.thinkingSupported
+                            text: "Thinking Mode"
+                            font.pixelSize: 13
+                            font.bold: true
+                            onToggled: {
+                                if (typeof orion !== "undefined" && orion !== null) {
+                                    orion.setShowThinking(checked)
+                                }
+                            }
+
+                            indicator: Rectangle {
+                                implicitWidth: 40
+                                implicitHeight: 22
+                                x: showThinkingToggle.leftPadding
+                                y: parent.height / 2 - height / 2
+                                radius: 11
+                                color: !showThinkingToggle.enabled
+                                    ? "#D5D2C8"
+                                    : (showThinkingToggle.checked ? "#4A6B5D" : "#B8B5AA")
+
+                                Rectangle {
+                                    x: showThinkingToggle.checked ? parent.width - width - 3 : 3
+                                    y: 3
+                                    width: 16
+                                    height: 16
+                                    radius: 8
+                                    color: "#FCFBF8"
+                                }
+                            }
+
+                            contentItem: Text {
+                                text: showThinkingToggle.text
+                                font: showThinkingToggle.font
+                                color: showThinkingToggle.enabled ? "#303A32" : "#898B80"
+                                verticalAlignment: Text.AlignVCenter
+                                leftPadding: showThinkingToggle.indicator.width + showThinkingToggle.spacing
                             }
                         }
-                    }
 
-                    Item { Layout.fillWidth: true }
+                        Rectangle {
+                            id: thinkingModeStateBadge
+                            objectName: "thinkingModeStateBadge"
+                            Layout.preferredHeight: 22
+                            Layout.preferredWidth: thinkingModeStateText.implicitWidth + 14
+                            radius: 6
+                            color: !root.thinkingSupported
+                                ? "#E7E4DC"
+                                : (root.showThinking ? "#4A6B5D" : "#DFDDD4")
+
+                            Text {
+                                id: thinkingModeStateText
+                                anchors.centerIn: parent
+                                text: !root.thinkingSupported
+                                    ? "Unavailable (model does not support thinking)"
+                                    : (root.showThinking ? "ON" : "OFF")
+                                font.pixelSize: 11
+                                font.bold: true
+                                color: !root.thinkingSupported
+                                    ? "#767B6E"
+                                    : (root.showThinking ? "#FCFBF8" : "#5A5F55")
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
                 }
 
                 // Message composer
@@ -1052,8 +1202,11 @@ ApplicationWindow {
                 }
 
                 Text {
+                    objectName: "providerFooterText"
                     Layout.fillWidth: true
-                    text: "ORION is running locally in simulated mode. Local AI model integration is the next milestone."
+                    text: root.isSimulatedProvider
+                        ? "ORION is running in Simulation Mode (FakeModelProvider)."
+                        : ("Connected to " + root.providerDisplay + " (local inference)")
                     color: "#A0A094"
                     font.pixelSize: 10
                     horizontalAlignment: Text.AlignHCenter

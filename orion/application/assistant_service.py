@@ -12,6 +12,7 @@ from orion.application.contracts import (
     ChatMessage,
     ChatRequest,
     ConversationSummary,
+    GenerationCompleted,
     MessageStatus,
     PersistedMessage,
     TextDelta,
@@ -44,10 +45,20 @@ class AssistantService:
         model_provider: ModelProvider,
         conversation_store: ConversationStore,
         settings_store: SettingsStore | None = None,
+        max_history_messages: int | None = None,
+        max_history_chars: int = 2400,
     ) -> None:
         self._model_provider = model_provider
         self._conversation_store = conversation_store
         self._settings_store = settings_store
+        if max_history_messages is None:
+            env_limit = os.environ.get("ORION_MAX_HISTORY_MESSAGES", "12").strip()
+            try:
+                max_history_messages = max(0, int(env_limit))
+            except ValueError:
+                max_history_messages = 12
+        self._max_history_messages = max_history_messages
+        self._max_history_chars = max(0, max_history_chars)
         self._active_conversation_id: str | None = None
         self._active_cancellations: dict[str, CancellationToken] = {}
         self._cancellations_lock = threading.Lock()
@@ -90,6 +101,20 @@ class AssistantService:
             except Exception:  # noqa: BLE001
                 return False
         return False
+
+    def is_simulated_provider(self) -> bool:
+        """Return True when running against a simulated/fake model provider."""
+        cls_name = type(self._model_provider).__name__.lower()
+        return "fake" in cls_name
+
+    def get_provider_display(self) -> str:
+        """Return human-readable runtime provider and model label."""
+        if self.is_simulated_provider():
+            return "Simulation Mode"
+        model_name = getattr(self._model_provider, "model_name", None)
+        if isinstance(model_name, str) and model_name.strip():
+            return f"Ollama · {model_name.strip()}"
+        return type(self._model_provider).__name__
 
     def get_show_thinking(self) -> bool:
         """Return the persisted Show thinking preference, falling back to ORION_OLLAMA_THINK (default False)."""
@@ -247,6 +272,51 @@ class AssistantService:
             if m.status == MessageStatus.COMPLETED and m.content
         ]
 
+    def _load_bounded_model_history(
+        self, conversation_id: str, exclude_request_id: str
+    ) -> list[ChatMessage]:
+        """Load completed conversation turns and bound to max_history_messages for inference."""
+        try:
+            persisted_history = self._conversation_store.load_history(conversation_id, limit=500)
+        except Exception as exc:
+            raise AssistantServiceError(f"Failed to load history for model: {exc}") from exc
+
+        completed_request_ids = {
+            m.client_request_id
+            for m in persisted_history
+            if m.role == "assistant" and m.status == MessageStatus.COMPLETED
+        }
+
+        chat_history = [
+            ChatMessage(
+                id=m.id,
+                role=m.role,
+                content=m.content or "",
+                timestamp=m.created_at,
+            )
+            for m in persisted_history
+            if m.status == MessageStatus.COMPLETED
+            and m.content
+            and m.client_request_id in completed_request_ids
+            and m.client_request_id != exclude_request_id
+        ]
+        if self._max_history_messages == 0:
+            return []
+        bounded = chat_history[-self._max_history_messages :]
+        if self._max_history_chars <= 0:
+            return bounded
+        # Enforce character/token budget from most recent backward while preserving turn order
+        kept: list[ChatMessage] = []
+        total_chars = 0
+        for msg in reversed(bounded):
+            msg_len = len(msg.content)
+            if kept and total_chars + msg_len > self._max_history_chars:
+                break
+            kept.append(msg)
+            total_chars += msg_len
+        kept.reverse()
+        return kept
+
     def send_message(
         self,
         content_or_request: str | ChatRequest,
@@ -339,33 +409,8 @@ class AssistantService:
                     or "Request was interrupted. A retry must use a new client_request_id.",
                 )
 
-        # C. Load model history
-        # Only include completed turns where both user and assistant completed,
-        # excluding the current request turn.
-        try:
-            persisted_history = self._conversation_store.load_history(cid, limit=100)
-        except Exception as exc:
-            raise AssistantServiceError(f"Failed to load history for model: {exc}") from exc
-
-        completed_request_ids = {
-            m.client_request_id
-            for m in persisted_history
-            if m.role == "assistant" and m.status == MessageStatus.COMPLETED
-        }
-
-        chat_history = [
-            ChatMessage(
-                id=m.id,
-                role=m.role,
-                content=m.content or "",
-                timestamp=m.created_at,
-            )
-            for m in persisted_history
-            if m.status == MessageStatus.COMPLETED
-            and m.content
-            and m.client_request_id in completed_request_ids
-            and m.client_request_id != req.client_request_id
-        ]
+        # C. Load model history (bounded for inference; full history remains in SQLite)
+        chat_history = self._load_bounded_model_history(cid, req.client_request_id)
 
         # D. Invoke model without holding open database transactions
         try:
@@ -511,31 +556,8 @@ class AssistantService:
                     f"Request was interrupted: {asst.error_message or asst.content or 'Cancelled'}"
                 )
 
-        # C. Load model history
-        try:
-            persisted_history = self._conversation_store.load_history(cid, limit=100)
-        except Exception as exc:
-            raise AssistantServiceError(f"Failed to load history for model: {exc}") from exc
-
-        completed_request_ids = {
-            m.client_request_id
-            for m in persisted_history
-            if m.role == "assistant" and m.status == MessageStatus.COMPLETED
-        }
-
-        chat_history = [
-            ChatMessage(
-                id=m.id,
-                role=m.role,
-                content=m.content or "",
-                timestamp=m.created_at,
-            )
-            for m in persisted_history
-            if m.status == MessageStatus.COMPLETED
-            and m.content
-            and m.client_request_id in completed_request_ids
-            and m.client_request_id != req.client_request_id
-        ]
+        # C. Load model history (bounded for inference; full history remains in SQLite)
+        chat_history = self._load_bounded_model_history(cid, req.client_request_id)
 
         # Register cancellation token for this active request
         cancellation_token = CancellationToken()
@@ -543,6 +565,7 @@ class AssistantService:
             self._active_cancellations[req.client_request_id] = cancellation_token
 
         accumulated_chunks: list[str] = []
+        completion_stop_reason = "stop"
         try:
             # Snapshot thinking preference at request start so mid-request toggles never alter it
             snapshot_think = self.get_show_thinking() and self.supports_thinking()
@@ -568,6 +591,8 @@ class AssistantService:
                         if on_chunk is not None:
                             on_chunk(event.text)
                         yield event.text
+                    elif isinstance(event, GenerationCompleted):
+                        completion_stop_reason = event.stop_reason or "stop"
             else:
                 if hasattr(self._model_provider, "stream_response"):
                     chunk_iter = self._model_provider.stream_response(
@@ -593,14 +618,27 @@ class AssistantService:
             if cancellation_token.is_cancelled:
                 raise OllamaCancelledError("Generation cancelled by user.")
 
-            # E. Successful completion: persist completed assistant response exactly once
+            # E. Successful completion (only if stop_reason == 'stop'; truncated stays incomplete)
             full_response = "".join(accumulated_chunks)
+            if completion_stop_reason != "stop":
+                self._conversation_store.interrupt_request(
+                    conversation_id=cid,
+                    client_request_id=req.client_request_id,
+                    partial_content=full_response,
+                    reason=f"Generation incomplete (stop_reason={completion_stop_reason}).",
+                )
+                raise AssistantServiceInterruptedError(
+                    f"Request {req.client_request_id} ended incomplete ({completion_stop_reason}).",
+                    partial_content=full_response,
+                )
             self._conversation_store.complete_request(
                 conversation_id=cid,
                 client_request_id=req.client_request_id,
                 response_content=full_response,
             )
         except Exception as model_exc:
+            if isinstance(model_exc, AssistantServiceInterruptedError):
+                raise
             if cancellation_token.is_cancelled or isinstance(model_exc, OllamaCancelledError):
                 partial_text = "".join(accumulated_chunks)
                 try:

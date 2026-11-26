@@ -1,8 +1,10 @@
 """Deterministic permission evaluation engine for ORION tool requests."""
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from orion.application.tools.contracts import (
     PermissionDecision,
@@ -12,8 +14,28 @@ from orion.application.tools.contracts import (
     ToolInvocation,
 )
 from orion.application.tools.ports import PermissionEnginePort
+from orion.application.tools.sensitive_paths import is_sensitive_relative_path
 
 logger = logging.getLogger(__name__)
+
+
+class ArgumentValidator(Protocol):
+    """Protocol for deterministic application-layer tool argument validators."""
+
+    def validate(self, tool: ToolDefinition, invocation: ToolInvocation) -> str | None:
+        """Return a denial reason string if invalid/prohibited, or None if permitted."""
+        ...
+
+
+class SensitivePathArgumentValidator:
+    """Rejects tool arguments referencing sensitive credential, key, or secret paths."""
+
+    def validate(self, tool: ToolDefinition, invocation: ToolInvocation) -> str | None:
+        """Return a denial reason if any string argument references a sensitive path."""
+        for arg_key, arg_val in invocation.arguments.items():
+            if isinstance(arg_val, str) and arg_val.strip() and is_sensitive_relative_path(arg_val):
+                return f"Argument '{arg_key}' references a prohibited sensitive path: {arg_val!r}."
+        return None
 
 
 @dataclass(frozen=True)
@@ -76,8 +98,17 @@ class PermissionEngine(PermissionEnginePort):
     Absence of an explicit permit rule results in immediate denial.
     """
 
-    def __init__(self, policy: PermissionPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: PermissionPolicy | None = None,
+        argument_validators: Sequence[ArgumentValidator] | None = None,
+    ) -> None:
         self._policy = policy if policy is not None else PermissionPolicy()
+        self._argument_validators: tuple[ArgumentValidator, ...] = (
+            tuple(argument_validators)
+            if argument_validators is not None
+            else (SensitivePathArgumentValidator(),)
+        )
 
     @property
     def policy(self) -> PermissionPolicy:
@@ -130,34 +161,46 @@ class PermissionEngine(PermissionEnginePort):
                         tool_id=tool_id,
                     )
 
-                # 3c. If workspace_root is configured, enforce strict path confinement
-                if self._policy.workspace_root is not None and arg_key in (
-                    "path",
-                    "target",
-                    "file",
-                ):
-                    try:
-                        resolved_root = self._policy.workspace_root.resolve()
-                        candidate = (resolved_root / arg_val).resolve()
-                        if candidate != resolved_root and resolved_root not in candidate.parents:
-                            return PermissionDecision(
-                                outcome=PermissionOutcome.DENY,
-                                reason=f"Path '{arg_val}' escapes authorized workspace root.",
-                                tool_id=tool_id,
-                            )
-                        raw_target = resolved_root / arg_val
-                        if raw_target.is_symlink():
-                            return PermissionDecision(
-                                outcome=PermissionOutcome.DENY,
-                                reason=f"Path '{arg_val}' is a symlink (symlinks are prohibited).",
-                                tool_id=tool_id,
-                            )
-                    except Exception as exc:  # noqa: BLE001
+                # 3c. Run application-layer argument validators (e.g. sensitive filenames/suffixes)
+        for validator in self._argument_validators:
+            denial_reason = validator.validate(tool, invocation)
+            if denial_reason is not None:
+                return PermissionDecision(
+                    outcome=PermissionOutcome.DENY,
+                    reason=denial_reason,
+                    tool_id=tool_id,
+                )
+
+        # 3d. If workspace_root is configured, enforce strict path confinement
+        for arg_key, arg_val in invocation.arguments.items():
+            if (
+                isinstance(arg_val, str)
+                and arg_val.strip()
+                and self._policy.workspace_root is not None
+                and arg_key in ("path", "target", "file")
+            ):
+                try:
+                    resolved_root = self._policy.workspace_root.resolve()
+                    candidate = (resolved_root / arg_val).resolve()
+                    if candidate != resolved_root and resolved_root not in candidate.parents:
                         return PermissionDecision(
                             outcome=PermissionOutcome.DENY,
-                            reason=f"Failed to validate path confinement for '{arg_val}': {exc}",
+                            reason=f"Path '{arg_val}' escapes authorized workspace root.",
                             tool_id=tool_id,
                         )
+                    raw_target = resolved_root / arg_val
+                    if raw_target.is_symlink():
+                        return PermissionDecision(
+                            outcome=PermissionOutcome.DENY,
+                            reason=f"Path '{arg_val}' is a symlink (symlinks are prohibited).",
+                            tool_id=tool_id,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    return PermissionDecision(
+                        outcome=PermissionOutcome.DENY,
+                        reason=f"Failed to validate path confinement for '{arg_val}': {exc}",
+                        tool_id=tool_id,
+                    )
 
         # 4. Code execution policy (distinct from READ_ONLY, WORKSPACE_WRITE, and SYSTEM_EXECUTE)
         if tool.permission_level == PermissionLevel.CODE_EXECUTION:
