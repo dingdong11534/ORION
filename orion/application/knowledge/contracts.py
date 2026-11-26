@@ -14,6 +14,33 @@ class IngestionStatus(StrEnum):
     FAILED = "failed"
 
 
+class KnowledgeScope(StrEnum):
+    """Explicit retrieval scope attached to a chat or knowledge generation request."""
+
+    NONE = "none"
+    ALL_INDEXED = "all_indexed"
+    SELECTED_DOCUMENTS = "selected_documents"
+
+
+class ReadingPolicy(StrEnum):
+    """Per-book spoiler and chapter-range retrieval policy for EPUB sources."""
+
+    UNCONFIGURED = "unconfigured"
+    SPOILER_SAFE = "spoiler_safe"
+    CHAPTER_RANGE = "chapter_range"
+    WHOLE_DOCUMENT = "whole_document"
+
+
+class AnswerIntent(StrEnum):
+    """Deterministic query intent classification for retrieval diversification & prompting."""
+
+    FACTUAL_LOOKUP = "factual_lookup"
+    CHARACTER_ANALYSIS = "character_analysis"
+    TIMELINE = "timeline"
+    COMPARISON = "comparison"
+    GENERAL_SUMMARY = "general_summary"
+
+
 class KnowledgeLimits(BaseModel):
     """Resource-aware bounds for local document ingestion and bounded RAG retrieval."""
 
@@ -54,6 +81,11 @@ class ExtractedSection(BaseModel):
     page_number: int | None = None
     section_title: str | None = None
     chapter_title: str | None = None
+    spine_index: int | None = None
+    chapter_index: int | None = None
+    reading_position: int | None = None
+    display_chapter_number: int | None = None
+    source_locator: str | None = None
     text: str
 
 
@@ -98,6 +130,12 @@ class ChunkDraft(BaseModel):
     chunk_index: int
     page_number: int | None = None
     section_title: str | None = None
+    spine_index: int | None = None
+    chapter_index: int | None = None
+    reading_position: int | None = None
+    display_chapter_number: int | None = None
+    chapter_title: str | None = None
+    source_locator: str | None = None
     content: str
     content_hash: str
 
@@ -119,6 +157,29 @@ class DocumentSourceRecord(BaseModel):
     extraction_version: str
     chunk_count: int = 0
     error_message: str | None = None
+    title: str | None = None
+    author: str | None = None
+    total_chapters: int = 0
+    current_reading_position: int | None = None
+    display_reading_chapter: int | None = None
+    reading_policy: ReadingPolicy = ReadingPolicy.UNCONFIGURED
+    range_start: int | None = None
+    range_end: int | None = None
+    progress_updated_at: datetime | None = None
+
+
+class ChapterInfo(BaseModel):
+    """Chapter/reading-position entry for EPUB navigation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reading_position: int
+    display_chapter_number: int | None = None
+    spine_index: int | None = None
+    chapter_index: int | None = None
+    chapter_title: str
+    source_locator: str | None = None
+    chunk_count: int = 0
 
 
 class DocumentChunkRecord(BaseModel):
@@ -147,6 +208,12 @@ class RetrievedPassage(BaseModel):
     chunk_index: int
     page_number: int | None = None
     section_title: str | None = None
+    spine_index: int | None = None
+    chapter_index: int | None = None
+    reading_position: int | None = None
+    display_chapter_number: int | None = None
+    chapter_title: str | None = None
+    source_locator: str | None = None
     content: str
     excerpt: str
     rank: float
@@ -159,8 +226,13 @@ class RetrievalResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     query: str
+    scope: KnowledgeScope = KnowledgeScope.SELECTED_DOCUMENTS
+    intent: AnswerIntent = AnswerIntent.FACTUAL_LOOKUP
     selected_document_ids: tuple[str, ...]
     passages: tuple[RetrievedPassage, ...]
     total_chars: int = 0
     has_evidence: bool = False
     message: str | None = None
+    blocked_sources: tuple[str, ...] = ()
+    spoiler_warning: str | None = None
+    scope_summary: str | None = None

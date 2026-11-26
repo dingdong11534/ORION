@@ -311,7 +311,7 @@ def _run_qml_thinking_ui_check(tmp_path: Path) -> None:
     assert asst_item.property("isAnsweringActive") is False
 
     # Verify plain-text rendering, bounded card geometry, wrapping, and no simulated-mode label leak
-    qml_src = qml_file.read_text()
+    qml_src = qml_file.read_text() + (qml_file.parent / "pages" / "ChatPage.qml").read_text()
     assert 'objectName: "thinkingToggleHeader"' in qml_src
     assert 'objectName: "thinkingPlainText"' in qml_src
     assert "textFormat: Text.PlainText" in qml_src

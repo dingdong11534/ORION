@@ -17,7 +17,7 @@ from pptx import Presentation
 from alembic import command
 from orion.application.assistant_service import AssistantService
 from orion.application.contracts import CancellationToken
-from orion.application.knowledge.contracts import IngestionStatus, KnowledgeLimits
+from orion.application.knowledge.contracts import IngestionStatus, KnowledgeLimits, ReadingPolicy
 from orion.application.knowledge.ports import (
     DocumentExtractionError,
     IngestionCancelledError,
@@ -455,6 +455,7 @@ def test_rag_references_for_epub_pptx_xlsx_and_deduplication(tmp_path: Path):
         epub_p = tmp_path / "handbook.epub"
         _build_epub(epub_p, version="3.0")
         epub_rec, _ = svc.import_file(epub_p)
+        svc.update_reading_progress(epub_rec.id, reading_policy=ReadingPolicy.WHOLE_DOCUMENT)
 
         prs = Presentation()
         s1 = prs.slides.add_slide(prs.slide_layouts[1])

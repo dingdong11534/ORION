@@ -18,6 +18,7 @@ from orion.application.contracts import (
     PersistedMessage,
     generate_request_id,
 )
+from orion.application.knowledge.contracts import KnowledgeScope, ReadingPolicy
 from orion.application.knowledge.retrieval import KnowledgeService
 from orion.application.tools.contracts import ExecutionStatus
 from orion.application.tools.router import RouterDisposition, ToolRouter
@@ -101,6 +102,10 @@ class OrionBridge(QObject):
     knowledgeError = Signal(str)
     knowledgeBusyChanged = Signal(bool)
     knowledgeProgress = Signal(dict)
+    knowledgeModeChanged = Signal(str)
+    knowledgeSearchResults = Signal(str, list)
+    epubChaptersLoaded = Signal(str, list, int, int)
+    workspaceAddedToKnowledge = Signal(str, str, bool)
     responseReferences = Signal(str, list)
 
     def __init__(
@@ -218,6 +223,22 @@ class OrionBridge(QObject):
         """Return True while a knowledge import/reindex/remove operation is running."""
         return self._knowledge_busy
 
+    @Property(str, notify=knowledgeModeChanged)
+    def knowledgeMode(self) -> str:
+        """Return persisted knowledge mode ('chat', 'ask_knowledge', or 'selected_sources')."""
+        if hasattr(self._service, "get_knowledge_mode"):
+            return str(self._service.get_knowledge_mode())
+        return "chat"
+
+    @Slot(str)
+    def setKnowledgeMode(self, mode: str) -> None:
+        """Persist and broadcast the active knowledge mode."""
+        if self._is_shutting_down:
+            return
+        if hasattr(self._service, "set_knowledge_mode"):
+            new_mode = self._service.set_knowledge_mode(mode)
+            self.knowledgeModeChanged.emit(new_mode)
+
     @Property(str, constant=True)
     def supportedKnowledgeFormats(self) -> str:
         """Return human-readable summary of supported Knowledge Base formats."""
@@ -251,6 +272,33 @@ class OrionBridge(QObject):
             else str(s.ingestion_status),
             "indexed_at": s.indexed_at.isoformat(),
             "error_message": s.error_message or "",
+            "title": getattr(s, "title", None) or "",
+            "author": getattr(s, "author", None) or "",
+            "total_chapters": int(getattr(s, "total_chapters", 0) or 0),
+            "current_reading_position": (
+                int(s.current_reading_position)
+                if getattr(s, "current_reading_position", None) is not None
+                else -1
+            ),
+            "display_reading_chapter": (
+                int(s.display_reading_chapter)
+                if getattr(s, "display_reading_chapter", None) is not None
+                else -1
+            ),
+            "reading_policy": (
+                s.reading_policy.value
+                if hasattr(getattr(s, "reading_policy", None), "value")
+                else str(getattr(s, "reading_policy", "unconfigured"))
+            ),
+            "range_start": (
+                int(s.range_start) if getattr(s, "range_start", None) is not None else -1
+            ),
+            "range_end": int(s.range_end) if getattr(s, "range_end", None) is not None else -1,
+            "progress_updated_at": (
+                s.progress_updated_at.isoformat()
+                if getattr(s, "progress_updated_at", None) is not None
+                else ""
+            ),
         }
 
     @staticmethod
@@ -295,6 +343,16 @@ class OrionBridge(QObject):
                 doc_id, sources = data
                 self.knowledgeSourceRemoved.emit(doc_id)
                 self.knowledgeSourcesLoaded.emit(sources)
+            elif op_name == "search":
+                q_str, hits = data
+                self.knowledgeSearchResults.emit(q_str, hits)
+            elif op_name == "chapters":
+                doc_id, chapters, total, offset = data
+                self.epubChaptersLoaded.emit(doc_id, chapters, total, offset)
+            elif op_name == "workspace_import":
+                rel_p, doc_id, already_indexed, sources = data
+                self.knowledgeSourcesLoaded.emit(sources)
+                self.workspaceAddedToKnowledge.emit(rel_p, doc_id, already_indexed)
 
         def _on_err(err: str) -> None:
             if not self._is_shutting_down:
@@ -420,6 +478,143 @@ class OrionBridge(QObject):
             svc.remove_source(document_id)
             sources = [self._source_to_dict(s) for s in svc.list_sources()]
             return ("remove", (document_id, sources))
+
+        self._run_knowledge_worker(_task)
+
+    @Slot(str, str, int)
+    def searchKnowledgeDirect(self, query: str, document_id: str = "", top_k: int = 12) -> None:
+        """Run direct FTS5 search without invoking any LLM and emit knowledgeSearchResults."""
+        if self._is_shutting_down:
+            return
+        q = query.strip()
+        if not q:
+            self.knowledgeSearchResults.emit("", [])
+            return
+
+        def _task(_token: CancellationToken) -> tuple[str, Any]:
+            if hasattr(self._service, "search_knowledge_direct"):
+                hits = self._service.search_knowledge_direct(
+                    q, document_id=document_id or None, top_k=max(1, min(top_k, 50))
+                )
+            else:
+                hits = []
+            return ("search", (q, hits))
+
+        self._run_knowledge_worker(_task)
+
+    @Slot(str, int, str, int, int)
+    def setEpubReadingProgress(
+        self,
+        document_id: str,
+        reading_position: int,
+        reading_policy: str,
+        range_start: int = -1,
+        range_end: int = -1,
+    ) -> None:
+        """Update EPUB reading progress and spoiler policy, then refresh sources."""
+        if self._is_shutting_down or self._knowledge_service is None:
+            return
+        svc = self._knowledge_service
+        try:
+            policy = ReadingPolicy(reading_policy.strip().lower())
+        except ValueError:
+            policy = ReadingPolicy.SPOILER_SAFE
+
+        def _task(_token: CancellationToken) -> tuple[str, Any]:
+            svc.update_reading_progress(
+                document_id=document_id,
+                display_chapter=reading_position if reading_position > 0 else None,
+                reading_policy=policy,
+                range_start=range_start if range_start > 0 else None,
+                range_end=range_end if range_end > 0 else None,
+            )
+            return ("list", [self._source_to_dict(s) for s in svc.list_sources()])
+
+        self._run_knowledge_worker(_task)
+
+    @Slot(str, str, int, int)
+    def loadEpubChapters(
+        self,
+        document_id: str,
+        query: str = "",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> None:
+        """Load paginated chapter entries for an EPUB source without loading all into QML."""
+        if self._is_shutting_down or self._knowledge_service is None:
+            return
+        svc = self._knowledge_service
+
+        def _task(_token: CancellationToken) -> tuple[str, Any]:
+            chapters, total = svc.list_chapters(
+                document_id=document_id,
+                query=query,
+                offset=offset,
+                limit=limit,
+            )
+            payload = [
+                {
+                    "reading_position": c.reading_position,
+                    "display_chapter_number": (
+                        c.display_chapter_number if c.display_chapter_number is not None else -1
+                    ),
+                    "spine_index": c.spine_index if c.spine_index is not None else -1,
+                    "chapter_index": c.chapter_index if c.chapter_index is not None else -1,
+                    "chapter_title": c.chapter_title,
+                    "source_locator": c.source_locator or "",
+                    "chunk_count": c.chunk_count,
+                }
+                for c in chapters
+            ]
+            return ("chapters", (document_id, payload, total, offset))
+
+        self._run_knowledge_worker(_task)
+
+    @Slot(str)
+    def addWorkspaceFileToKnowledge(self, relative_path: str) -> None:
+        """Explicitly import a validated workspace file into the Knowledge Base."""
+        if self._is_shutting_down:
+            return
+        if self._knowledge_service is None:
+            self.knowledgeError.emit("Knowledge Base service is not configured.")
+            return
+        if self._workspace_root is None:
+            self.knowledgeError.emit("Workspace root is not configured.")
+            return
+
+        from orion.application.tools.sensitive_paths import (
+            is_sensitive_filename,
+            is_sensitive_relative_path,
+        )
+        from orion.infrastructure.tools.path_resolver import WorkspacePathResolver
+
+        rel = relative_path.strip()
+        try:
+            if is_sensitive_relative_path(rel):
+                self.knowledgeError.emit(f"Sensitive workspace file cannot be indexed: {rel}")
+                return
+            resolver = WorkspacePathResolver(self._workspace_root)
+            resolved = resolver.resolve_path(rel)
+            if is_sensitive_filename(resolved.name):
+                self.knowledgeError.emit(f"Sensitive workspace file cannot be indexed: {rel}")
+                return
+            if not resolved.is_file():
+                self.knowledgeError.emit(f"Workspace path is not a readable file: {rel}")
+                return
+        except Exception as exc:  # noqa: BLE001
+            self.knowledgeError.emit(str(exc))
+            return
+
+        svc = self._knowledge_service
+
+        def _task(token: CancellationToken) -> tuple[str, Any]:
+            rec, needs_reindex = svc.import_file(
+                resolved,
+                cancel_token=token,
+                on_progress=lambda info: self.knowledgeProgress.emit(info),
+            )
+            sources = [self._source_to_dict(s) for s in svc.list_sources()]
+            return ("workspace_import", (rel, rec.id, not needs_reindex, sources))
 
         self._run_knowledge_worker(_task)
 
@@ -624,6 +819,8 @@ class OrionBridge(QObject):
             return
         if hasattr(self._service, "supports_thinking"):
             self.thinkingSupportedChanged.emit(bool(self._service.supports_thinking()))
+        if hasattr(self._service, "get_knowledge_mode"):
+            self.knowledgeModeChanged.emit(str(self._service.get_knowledge_mode()))
 
         def _task() -> tuple[str, list[dict[str, Any]], str, list[dict[str, Any]]]:
             convs = [_conv_to_dict(c) for c in self._service.list_conversations()]
@@ -821,12 +1018,23 @@ class OrionBridge(QObject):
 
     @Slot(str)
     def sendMessage(self, message: str) -> None:
-        """Validate input and initiate background message processing."""
-        self.sendMessageWithSources(message, [])
+        """Validate input and initiate background message processing using current mode."""
+        mode = self.knowledgeMode
+        if mode == "ask_knowledge":
+            self.sendMessageWithScope(message, "ask_knowledge", [])
+        else:
+            self.sendMessageWithScope(message, "chat", [])
 
     @Slot(str, list)
     def sendMessageWithSources(self, message: str, selected_document_ids: list) -> None:
         """Validate input and initiate background message processing with optional RAG sources."""
+        doc_ids = [str(d) for d in (selected_document_ids or []) if str(d).strip()]
+        mode = "selected_sources" if doc_ids else "chat"
+        self.sendMessageWithScope(message, mode, doc_ids)
+
+    @Slot(str, str, list)
+    def sendMessageWithScope(self, message: str, mode: str, selected_document_ids: list) -> None:
+        """Initiate background message processing with explicit KnowledgeScope."""
         if self._is_shutting_down:
             self.errorOccurred.emit("Application is shutting down. Request rejected.")
             return
@@ -839,6 +1047,14 @@ class OrionBridge(QObject):
         if self._is_busy:
             self.errorOccurred.emit("A request is already in progress. Please wait.")
             return
+
+        norm_mode = (mode or "chat").strip().lower()
+        if norm_mode == "ask_knowledge":
+            scope = KnowledgeScope.ALL_INDEXED
+        elif norm_mode == "selected_sources":
+            scope = KnowledgeScope.SELECTED_DOCUMENTS
+        else:
+            scope = KnowledgeScope.NONE
 
         target_cid = self._service.active_conversation_id
         request_id = generate_request_id()
@@ -855,6 +1071,7 @@ class OrionBridge(QObject):
                     on_thinking=lambda t: signals.thinking.emit(request_id, t),
                     selected_document_ids=doc_ids,
                     on_references=lambda refs: signals.references.emit(request_id, refs),
+                    knowledge_scope=scope,
                 ):
                     accumulated.append(chunk)
                     signals.chunk.emit(request_id, chunk)

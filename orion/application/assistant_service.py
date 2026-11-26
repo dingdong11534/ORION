@@ -20,6 +20,7 @@ from orion.application.contracts import (
     ThinkingDelta,
     generate_request_id,
 )
+from orion.application.knowledge.contracts import KnowledgeScope
 from orion.application.knowledge.retrieval import DocumentRetrievalService, build_rag_prompt
 from orion.application.ports import (
     ConversationNotFoundError,
@@ -145,6 +146,62 @@ class AssistantService:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to persist show_thinking_trace setting: %s", exc)
         return val
+
+    def get_knowledge_mode(self) -> str:
+        """Return persisted knowledge mode ('chat', 'ask_knowledge', or 'selected_sources').
+
+        Defaults to 'chat' so existing normal-chat behaviour is preserved.
+        """
+        valid = {"chat", "ask_knowledge", "selected_sources"}
+        if self._settings_store is not None:
+            try:
+                saved = self._settings_store.get_setting("knowledge_mode")
+                if isinstance(saved, str) and saved.strip().lower() in valid:
+                    return saved.strip().lower()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to read knowledge_mode setting: %s", exc)
+        return "chat"
+
+    def set_knowledge_mode(self, mode: str) -> str:
+        """Persist knowledge mode ('chat', 'ask_knowledge', or 'selected_sources')."""
+        normalized = mode.strip().lower()
+        if normalized not in {"chat", "ask_knowledge", "selected_sources"}:
+            normalized = "chat"
+        if self._settings_store is not None:
+            try:
+                self._settings_store.set_setting("knowledge_mode", normalized)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist knowledge_mode setting: %s", exc)
+        return normalized
+
+    def search_knowledge_direct(
+        self,
+        query: str,
+        document_id: str | None = None,
+        top_k: int = 12,
+    ) -> list[dict[str, Any]]:
+        """Run a direct FTS5 search without invoking any LLM."""
+        if self._retrieval_service is None:
+            return []
+        passages = self._retrieval_service.search_direct(
+            query=query,
+            document_id=document_id,
+            top_k=top_k,
+        )
+        return [
+            {
+                "chunk_id": p.chunk_id,
+                "document_id": p.document_id,
+                "display_name": p.display_name,
+                "source_path": p.source_path,
+                "chunk_index": p.chunk_index,
+                "page_number": p.page_number if p.page_number is not None else -1,
+                "section_title": p.section_title or "",
+                "excerpt": p.excerpt,
+                "content": p.content,
+            }
+            for p in passages
+        ]
 
     def get_active_conversation(self) -> ConversationSummary | None:
         """Return the ConversationSummary for the active conversation, or None."""
@@ -506,6 +563,7 @@ class AssistantService:
         on_thinking: Callable[[str], None] | None = None,
         selected_document_ids: Sequence[str] | None = None,
         on_references: Callable[[list[dict[str, Any]]], None] | None = None,
+        knowledge_scope: KnowledgeScope | None = None,
     ) -> Iterator[str]:
         """Process incoming user message incrementally, yielding chunks and persisting once complete."""
         # A. Receive request & validate
@@ -576,11 +634,25 @@ class AssistantService:
             # Snapshot thinking preference at request start so mid-request toggles never alter it
             snapshot_think = self.get_show_thinking() and self.supports_thinking()
 
-            # D. Optional local RAG retrieval when user explicitly selected knowledge sources
+            # D. Optional local RAG retrieval governed by explicit KnowledgeScope
             model_prompt = req.content
             clean_doc_ids = [d for d in (selected_document_ids or ()) if d and d.strip()]
-            if clean_doc_ids and self._retrieval_service is not None:
-                retrieval = self._retrieval_service.retrieve(req.content, clean_doc_ids)
+            if knowledge_scope is not None:
+                effective_scope = knowledge_scope
+            elif clean_doc_ids:
+                effective_scope = KnowledgeScope.SELECTED_DOCUMENTS
+            else:
+                effective_scope = KnowledgeScope.NONE
+
+            if (
+                effective_scope in (KnowledgeScope.ALL_INDEXED, KnowledgeScope.SELECTED_DOCUMENTS)
+                and self._retrieval_service is not None
+            ):
+                retrieval = self._retrieval_service.retrieve(
+                    req.content,
+                    clean_doc_ids,
+                    scope=effective_scope,
+                )
                 if on_references is not None:
                     refs_payload = [
                         {
@@ -591,6 +663,17 @@ class AssistantService:
                             "chunk_index": p.chunk_index,
                             "page_number": p.page_number if p.page_number is not None else -1,
                             "section_title": p.section_title or "",
+                            "reading_position": (
+                                p.reading_position if p.reading_position is not None else -1
+                            ),
+                            "display_chapter_number": (
+                                p.display_chapter_number
+                                if p.display_chapter_number is not None
+                                else -1
+                            ),
+                            "chapter_title": p.chapter_title or "",
+                            "source_locator": p.source_locator or "",
+                            "scope_summary": retrieval.scope_summary or "",
                             "excerpt": p.excerpt,
                             "is_selected_source": p.is_selected_source,
                         }
@@ -598,10 +681,23 @@ class AssistantService:
                     ]
                     on_references(refs_payload)
                 if not retrieval.has_evidence:
-                    no_ev_msg = (
-                        "Insufficient evidence: no relevant passages were found in the "
-                        "selected knowledge sources for this question."
-                    )
+                    if retrieval.spoiler_warning:
+                        no_ev_msg = retrieval.spoiler_warning
+                    elif effective_scope == KnowledgeScope.SELECTED_DOCUMENTS and not clean_doc_ids:
+                        no_ev_msg = (
+                            "No knowledge sources selected. Select one or more documents or "
+                            "switch to Ask Knowledge mode to search all indexed documents."
+                        )
+                    elif effective_scope == KnowledgeScope.ALL_INDEXED:
+                        no_ev_msg = (
+                            "Insufficient evidence: no relevant passages were found in the "
+                            "indexed knowledge base for this question."
+                        )
+                    else:
+                        no_ev_msg = (
+                            "Insufficient evidence: no relevant passages were found in the "
+                            "selected knowledge sources for this question."
+                        )
                     accumulated_chunks.append(no_ev_msg)
                     if on_chunk is not None:
                         on_chunk(no_ev_msg)

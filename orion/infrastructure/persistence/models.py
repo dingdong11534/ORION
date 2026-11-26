@@ -255,6 +255,15 @@ class DocumentSourceModel(Base):
     extraction_version: Mapped[str] = mapped_column(String(16), nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(String, nullable=True)
+    author: Mapped[str | None] = mapped_column(String, nullable=True)
+    total_chapters: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_reading_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    display_reading_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reading_policy: Mapped[str] = mapped_column(String(32), nullable=False, default="unconfigured")
+    range_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    range_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    progress_updated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     chunks: Mapped[list["DocumentChunkModel"]] = relationship(
         "DocumentChunkModel",
@@ -280,6 +289,12 @@ class DocumentChunkModel(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     section_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    spine_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chapter_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reading_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    display_chapter_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chapter_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_locator: Mapped[str | None] = mapped_column(String, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
 

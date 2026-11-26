@@ -1,6 +1,7 @@
 """Dedicated EPUB2 and EPUB3 streaming extractor using stdlib ZIP/XML/HTML."""
 
 import posixpath
+import re
 import zipfile
 from collections.abc import Iterator
 from html.parser import HTMLParser
@@ -83,6 +84,25 @@ class _XHTMLTextExtractor(HTMLParser):
     def finish(self) -> list[tuple[str | None, str]]:
         self._flush_section()
         return self.sections
+
+
+_DISPLAY_CH_RE = re.compile(r"^(?:chapter|ch\.?)\s+(\d{1,5})\b", re.IGNORECASE)
+
+
+def parse_display_chapter_number(title: str | None) -> int | None:
+    """Parse the displayed novel chapter number from a heading/TOC title, or None for frontmatter."""
+    if not title:
+        return None
+    m = _DISPLAY_CH_RE.match(title.strip())
+    return int(m.group(1)) if m else None
+
+
+def _clean_epub_text(raw: str) -> str:
+    """Strip zero-width characters and normalize whitespace in EPUB titles/text."""
+    cleaned = (
+        raw.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    )
+    return " ".join(cleaned.split())
 
 
 def _local_name(tag: str) -> str:
@@ -280,6 +300,7 @@ def parse_epub_metadata_and_sections(
 
     def _iter() -> Iterator[ExtractedSection]:
         max_member = min(limits.max_binary_file_bytes, 32 * 1024 * 1024)
+        chapter_counter = 0
         for spine_idx, idref in enumerate(spine_ids, start=1):
             if cancel_token is not None and cancel_token.is_cancelled:
                 raise IngestionCancelledError("EPUB extraction cancelled by user.")
@@ -296,16 +317,35 @@ def parse_epub_metadata_and_sections(
             parser = _XHTMLTextExtractor()
             parser.feed(raw_html.decode("utf-8", errors="replace"))
             parsed_sections = parser.finish()
-            chap_title = toc_titles.get(href) or (
-                parsed_sections[0][0]
-                if parsed_sections and parsed_sections[0][0]
-                else f"Chapter {spine_idx}"
+            if not parsed_sections:
+                continue
+            chapter_counter += 1
+            explicit_title = toc_titles.get(href) or (
+                parsed_sections[0][0] if parsed_sections and parsed_sections[0][0] else None
+            )
+            chap_title = (
+                _clean_epub_text(explicit_title) if explicit_title else ""
+            ) or f"Section {chapter_counter}"
+            display_num = parse_display_chapter_number(
+                _clean_epub_text(explicit_title) if explicit_title else None
             )
             for sec_heading, body in parsed_sections:
+                clean_heading = _clean_epub_text(sec_heading) if sec_heading else chap_title
+                clean_body = (
+                    body.replace("\u200b", "")
+                    .replace("\u200c", "")
+                    .replace("\u200d", "")
+                    .replace("\ufeff", "")
+                )
                 yield ExtractedSection(
                     chapter_title=chap_title,
-                    section_title=sec_heading or chap_title,
-                    text=body,
+                    section_title=clean_heading,
+                    spine_index=spine_idx,
+                    chapter_index=chapter_counter,
+                    reading_position=chapter_counter,
+                    display_chapter_number=display_num,
+                    source_locator=href,
+                    text=clean_body,
                 )
 
     return meta, _iter()

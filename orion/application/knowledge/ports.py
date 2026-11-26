@@ -6,11 +6,13 @@ from typing import Protocol
 
 from orion.application.contracts import CancellationToken
 from orion.application.knowledge.contracts import (
+    ChapterInfo,
     ChunkDraft,
     DocumentSourceRecord,
     ExtractedDocument,
     ExtractedHeader,
     ExtractedSection,
+    ReadingPolicy,
     RetrievedPassage,
 )
 
@@ -82,8 +84,31 @@ class KnowledgeStorePort(Protocol):
         self,
         document_id: str,
         chunk_count: int,
+        total_chapters: int = 0,
     ) -> DocumentSourceRecord:
-        """Mark a document source as INDEXED with final chunk_count."""
+        """Mark a document source as INDEXED with final chunk_count and total_chapters."""
+        ...
+
+    def update_reading_progress(
+        self,
+        document_id: str,
+        reading_position: int | None = None,
+        reading_policy: ReadingPolicy | None = None,
+        range_start: int | None = None,
+        range_end: int | None = None,
+        display_chapter: int | None = None,
+    ) -> DocumentSourceRecord:
+        """Persist reading progress and spoiler policy for an EPUB source."""
+        ...
+
+    def list_chapters(
+        self,
+        document_id: str,
+        query: str = "",
+        offset: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[ChapterInfo], int]:
+        """Return paginated chapter entries for an EPUB source and total matching count."""
         ...
 
     def mark_document_failed(
@@ -118,8 +143,11 @@ class KnowledgeStorePort(Protocol):
     def search_chunks(
         self,
         query: str,
-        document_ids: Sequence[str],
+        document_ids: Sequence[str] | None = None,
         top_k: int = 4,
+        chapter_min: int | None = None,
+        chapter_max: int | None = None,
+        respect_reading_policy: bool = True,
     ) -> Sequence[RetrievedPassage]:
-        """Search FTS5 chunks strictly within the explicitly selected document_ids."""
+        """Search FTS5 chunks within document_ids (or all INDEXED when None), enforcing chapter bounds in SQL."""
         ...

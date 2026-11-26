@@ -77,6 +77,12 @@ def iter_chunks(
                     chunk_index=chunk_index,
                     page_number=section.page_number,
                     section_title=section_label,
+                    spine_index=section.spine_index,
+                    chapter_index=section.chapter_index,
+                    reading_position=section.reading_position,
+                    display_chapter_number=section.display_chapter_number,
+                    chapter_title=section.chapter_title,
+                    source_locator=section.source_locator,
                     content=piece,
                     content_hash=digest,
                 )
