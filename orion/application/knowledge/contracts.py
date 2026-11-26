@@ -163,7 +163,7 @@ class DocumentSourceRecord(BaseModel):
     total_chapters: int = 0
     current_reading_position: int | None = None
     display_reading_chapter: int | None = None
-    reading_policy: ReadingPolicy = ReadingPolicy.UNCONFIGURED
+    reading_policy: ReadingPolicy = ReadingPolicy.WHOLE_DOCUMENT
     range_start: int | None = None
     range_end: int | None = None
     progress_updated_at: datetime | None = None

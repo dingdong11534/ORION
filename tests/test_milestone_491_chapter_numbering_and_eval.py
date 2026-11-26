@@ -15,7 +15,6 @@ from orion.application.knowledge.contracts import (
 from orion.application.knowledge.retrieval import (
     DocumentRetrievalService,
     KnowledgeService,
-    build_fts_query,
     build_rag_prompt,
 )
 from orion.infrastructure.knowledge.extractor import LocalDocumentExtractor
@@ -146,7 +145,7 @@ def test_epub_numbering_variants_and_2334_chapter_offset(tmp_path: Path):
 
 
 def test_spoiler_boundaries_exact_chapter_85_86_87_and_invalid_inputs(tmp_path: Path):
-    """Verify Chapter 85 allows Ch 85 (pos 86), excludes Ch 86 (pos 87); advancing to 86 allows Ch 86 and excludes 87."""
+    """Verify Chapter 85, 86, and 87 are all retrievable regardless of reading progress."""
     engine, store, kb_svc, retrieval = _setup_491(tmp_path)
     try:
         chapters = []
@@ -174,36 +173,34 @@ def test_spoiler_boundaries_exact_chapter_85_86_87_and_invalid_inputs(tmp_path: 
         )
         rec, _ = kb_svc.import_file(epub_p)
 
-        # Set reading progress to display_chapter=85 -> resolves to reading_position=86
+        # Set reading progress to display_chapter=85 -> resolves to reading_position=86 (informational)
         rec_85 = kb_svc.update_reading_progress(rec.id, display_chapter=85)
         assert rec_85.display_reading_chapter == 85
         assert rec_85.current_reading_position == 86
+        assert rec_85.reading_policy == ReadingPolicy.WHOLE_DOCUMENT
 
-        # Ch 85 allowed, Ch 86 excluded in SQL
+        # Ch 85, Ch 86, and Ch 87 are all retrievable regardless of reading progress
         res_85 = retrieval.retrieve("ALPHA85", [rec.id], KnowledgeScope.SELECTED_DOCUMENTS)
         assert res_85.has_evidence and res_85.passages[0].display_chapter_number == 85
 
-        res_86_blocked = retrieval.retrieve("BETA86", [rec.id], KnowledgeScope.SELECTED_DOCUMENTS)
-        assert not res_86_blocked.has_evidence
-        assert store.search_chunks('"beta86"', [rec.id], respect_reading_policy=True) == []
+        res_86_open = retrieval.retrieve("BETA86", [rec.id], KnowledgeScope.SELECTED_DOCUMENTS)
+        assert res_86_open.has_evidence and res_86_open.passages[0].display_chapter_number == 86
+        assert len(store.search_chunks('"beta86"', [rec.id], respect_reading_policy=True)) == 1
 
-        # Future chapter warning
-        res_warn = retrieval.retrieve(
+        # Explicit future chapter query succeeds without spoiler_warning
+        res_ch86 = retrieval.retrieve(
             "What happens in Chapter 86?", [rec.id], KnowledgeScope.SELECTED_DOCUMENTS
         )
-        assert not res_warn.has_evidence and res_warn.spoiler_warning is not None
-        assert "85" in res_warn.spoiler_warning
+        assert res_ch86.has_evidence and res_ch86.spoiler_warning is None
+        assert res_ch86.passages[0].display_chapter_number == 86
 
-        # Advance to display_chapter=86 -> Ch 86 allowed, Ch 87 excluded
+        # Advance to display_chapter=86 -> Ch 87 remains retrievable too
         rec_86 = kb_svc.update_reading_progress(rec.id, display_chapter=86)
         assert rec_86.display_reading_chapter == 86
         assert rec_86.current_reading_position == 87
 
-        res_86_ok = retrieval.retrieve("BETA86", [rec.id], KnowledgeScope.SELECTED_DOCUMENTS)
-        assert res_86_ok.has_evidence and res_86_ok.passages[0].display_chapter_number == 86
-
-        res_87_blocked = retrieval.retrieve("GAMMA87", [rec.id], KnowledgeScope.SELECTED_DOCUMENTS)
-        assert not res_87_blocked.has_evidence
+        res_87_open = retrieval.retrieve("GAMMA87", [rec.id], KnowledgeScope.SELECTED_DOCUMENTS)
+        assert res_87_open.has_evidence and res_87_open.passages[0].display_chapter_number == 87
 
         # Invalid progress & empty/inverted ranges rejected
         with pytest.raises(ValueError):
@@ -218,7 +215,7 @@ def test_spoiler_boundaries_exact_chapter_85_86_87_and_invalid_inputs(tmp_path: 
 
 def test_comparative_retrieval_evaluation_and_grounding_prompt(tmp_path: Path):
     """Measure Precision@4, Recall@4, MRR, Hit Rate, Future Leakage, and Grounding across 8 query types."""
-    engine, store, kb_svc, retrieval = _setup_491(tmp_path)
+    engine, _store, kb_svc, retrieval = _setup_491(tmp_path)
     try:
         chapters = []
         for i in range(1, 131):
@@ -272,23 +269,11 @@ def test_comparative_retrieval_evaluation_and_grounding_prompt(tmp_path: Path):
             ("What happened in Chapter 40?", {40}, False),  # chapter-specific
             ("What does Spring Autumn Cicada do?", {40}, False),  # proper-name
             ("How did Fang Yuan travel back 500 years?", {40}, False),  # paraphrased
-            ("What happens in Chapter 125 Shang Clan City?", set(), True),  # future spoiler (>100)
+            ("What happens in Chapter 125 Shang Clan City?", {125}, False),  # full-book access
             ("What is the orbital velocity of Mars?", set(), True),  # no evidence
         ]
 
-        # BEFORE baseline: FTS5 query without policy enforcement
-        before_leaks = 0
-        for q, _exp, _fut in dataset:
-            raw = store.search_chunks(
-                build_fts_query(q),
-                [rec.id],
-                top_k=4,
-                respect_reading_policy=False,
-            )
-            before_leaks += sum(1 for p in raw if (p.display_chapter_number or 0) > 100)
-
-        # AFTER (Milestone 4.9.1)
-        after_leaks = 0
+        # Full-knowledge retrieval metrics (no artificial chapter blocking)
         hits = 0
         answerable = 0
         precisions: list[float] = []
@@ -297,12 +282,10 @@ def test_comparative_retrieval_evaluation_and_grounding_prompt(tmp_path: Path):
         insufficient_ok = 0
         insufficient_total = 0
 
-        for q, expected_chs, is_blocked_or_absent in dataset:
+        for q, expected_chs, is_absent in dataset:
             res = retrieval.retrieve(q, [rec.id], KnowledgeScope.SELECTED_DOCUMENTS)
-            for p in res.passages:
-                if (p.display_chapter_number or 0) > 100:
-                    after_leaks += 1
-            if is_blocked_or_absent:
+            assert res.spoiler_warning is None
+            if is_absent:
                 insufficient_total += 1
                 if not res.has_evidence:
                     insufficient_ok += 1
@@ -321,8 +304,6 @@ def test_comparative_retrieval_evaluation_and_grounding_prompt(tmp_path: Path):
                         break
                 mrrs.append(rr)
 
-        assert before_leaks > 0
-        assert after_leaks == 0
         assert hits == answerable
         assert insufficient_ok == insufficient_total
         assert sum(mrrs) / len(mrrs) >= 0.7
@@ -334,7 +315,7 @@ def test_comparative_retrieval_evaluation_and_grounding_prompt(tmp_path: Path):
             KnowledgeScope.SELECTED_DOCUMENTS,
         )
         prompt = build_rag_prompt("Describe Fang Yuan's character development", res_dev)
-        assert "Spoiler-safe through Chapter 100" in prompt
+        assert "Whole book searchable" in prompt
         assert "Chapter 10" in prompt
         assert "not an exhaustive scan" in prompt
     finally:

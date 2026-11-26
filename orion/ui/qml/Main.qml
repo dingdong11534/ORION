@@ -173,16 +173,12 @@ ApplicationWindow {
             if (root.knowledgeMode === "selected_sources" && root.selectedKnowledgeIds.indexOf(s.id) === -1)
                 continue
             const name = s.title || s.display_name
-            if (s.reading_policy === "spoiler_safe" && s.current_reading_position > 0) {
-                const chDisp = s.display_reading_chapter > 0 ? s.display_reading_chapter : s.current_reading_position
-                parts.push(name + " · Spoiler-safe through Chapter " + chDisp)
+            const chDisp = s.display_reading_chapter > 0 ? s.display_reading_chapter : s.current_reading_position
+            if (chDisp > 0) {
+                parts.push(name + " · Whole book searchable (Reading: Ch " + chDisp + ")")
+            } else {
+                parts.push(name + " · Whole book searchable")
             }
-            else if (s.reading_policy === "chapter_range" && s.range_start > 0 && s.range_end > 0)
-                parts.push(name + " · Chapters " + s.range_start + "–" + s.range_end)
-            else if (s.reading_policy === "whole_document")
-                parts.push(name + " · Whole book")
-            else
-                parts.push(name + " · Progress unconfigured (spoilers blocked)")
         }
         return parts.join(" | ")
     }

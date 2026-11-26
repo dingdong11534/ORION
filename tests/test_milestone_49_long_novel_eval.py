@@ -180,7 +180,7 @@ def test_long_novel_chapter_order_spoiler_control_and_chronological_rag(tmp_path
         assert rec.title == "Synthetic Insanity"
         assert rec.author == "Test Author"
         assert rec.total_chapters == 150
-        assert rec.reading_policy == ReadingPolicy.UNCONFIGURED
+        assert rec.reading_policy == ReadingPolicy.WHOLE_DOCUMENT
 
         # Unrelated non-EPUB doc
         other = tmp_path / "manual.txt"
@@ -196,19 +196,19 @@ def test_long_novel_chapter_order_spoiler_control_and_chronological_rag(tmp_path
         assert ch_search_total == 1
         assert ch_search[0].reading_position == 120
 
-        # Unconfigured EPUB is blocked from silently leaking spoilers
+        # Newly imported EPUB is immediately searchable across all chapters
         res_unconf = retrieval.retrieve(
             "What happens with Sovereign Immortal Aperture?",
             selected_document_ids=[rec.id],
             scope=KnowledgeScope.SELECTED_DOCUMENTS,
         )
-        assert res_unconf.has_evidence is False
-        assert res_unconf.spoiler_warning is not None
-        assert rec.title in res_unconf.blocked_sources
+        assert res_unconf.has_evidence is True
+        assert res_unconf.spoiler_warning is None
+        assert any(p.reading_position == 145 for p in res_unconf.passages)
 
-        # 1) Set reading progress to Chapter 85 (defaults to SPOILER_SAFE)
+        # 1) Set reading progress to Chapter 85 (informational; policy remains WHOLE_DOCUMENT)
         rec_85 = kb_svc.update_reading_progress(rec.id, reading_position=85)
-        assert rec_85.reading_policy == ReadingPolicy.SPOILER_SAFE
+        assert rec_85.reading_policy == ReadingPolicy.WHOLE_DOCUMENT
         assert rec_85.current_reading_position == 85
 
         res_85 = retrieval.retrieve(
@@ -217,24 +217,19 @@ def test_long_novel_chapter_order_spoiler_control_and_chronological_rag(tmp_path
             scope=KnowledgeScope.SELECTED_DOCUMENTS,
         )
         assert res_85.has_evidence is True
-        assert all(
-            p.reading_position is not None and p.reading_position <= 85 for p in res_85.passages
-        )
-        assert not any(
-            p.reading_position is not None and p.reading_position > 85 for p in res_85.passages
-        )
+        assert res_85.spoiler_warning is None
 
-        # 4) Querying Chapter 120 while progress is 85 triggers spoiler warning without leaking
+        # 4) Querying Chapter 120 while progress is 85 succeeds without spoiler blocking
         res_future = retrieval.retrieve(
             "What happens in Chapter 120?",
             selected_document_ids=[rec.id],
             scope=KnowledgeScope.SELECTED_DOCUMENTS,
         )
-        assert res_future.has_evidence is False
-        assert res_future.spoiler_warning is not None
-        assert "85" in res_future.spoiler_warning
+        assert res_future.has_evidence is True
+        assert res_future.spoiler_warning is None
+        assert any(p.reading_position == 120 for p in res_future.passages)
 
-        # 2) Update progress to Chapter 120 -> newly permitted evidence appears
+        # 2) Chronological order preserved for multi-stage queries
         kb_svc.update_reading_progress(rec.id, reading_position=120)
         res_120 = retrieval.retrieve(
             "Explain Fang Yuan character development across stages",
@@ -243,12 +238,9 @@ def test_long_novel_chapter_order_spoiler_control_and_chronological_rag(tmp_path
         )
         assert res_120.intent == AnswerIntent.CHARACTER_ANALYSIS
         positions_120 = [p.reading_position for p in res_120.passages if p.reading_position]
-        assert any(pos == 120 for pos in positions_120)
-        assert all(pos <= 120 for pos in positions_120)
-        # Chronological order preserved
         assert positions_120 == sorted(positions_120)
 
-        # 3) CHAPTER_RANGE restricted to Chapters 1-100 excludes 120 and 145
+        # 3) Legacy CHAPTER_RANGE parameter does not block full-document retrieval
         kb_svc.update_reading_progress(
             rec.id, reading_policy=ReadingPolicy.CHAPTER_RANGE, range_start=1, range_end=100
         )
@@ -257,9 +249,9 @@ def test_long_novel_chapter_order_spoiler_control_and_chronological_rag(tmp_path
             selected_document_ids=[rec.id],
             scope=KnowledgeScope.SELECTED_DOCUMENTS,
         )
-        assert res_range.has_evidence is False
+        assert res_range.has_evidence is True
 
-        # 5-6) WHOLE_DOCUMENT with explicit spoiler consent covers early, middle, and late stages
+        # 5-6) WHOLE_DOCUMENT covers early, middle, and late stages
         kb_svc.update_reading_progress(rec.id, reading_policy=ReadingPolicy.WHOLE_DOCUMENT)
         res_whole = retrieval.retrieve(
             "Describe Fang Yuan character evolution and development",
@@ -328,21 +320,17 @@ def test_curated_retrieval_evaluation_metrics(tmp_path: Path):
             rec.id, reading_position=85, reading_policy=ReadingPolicy.SPOILER_SAFE
         )
 
-        # Curated evaluation set: (query, expected_chapter_or_None)
+        # Curated evaluation set: (query, expected_chapter) — all chapters accessible
         eval_cases = [
             ("What does Spring Autumn Cicada do?", 40),
             ("What happened in Qing Mao Mountain with Moonlight Gu?", 85),
-            (
-                "What happened in Chapter 120 Burning Soul Bursting Luck?",
-                None,
-            ),  # blocked by spoiler guard!
-            ("What is Sovereign Immortal Aperture?", None),  # blocked by spoiler guard (>85)
+            ("What happened in Chapter 120 Burning Soul Bursting Luck?", 120),
+            ("What is Sovereign Immortal Aperture?", 145),
             ("What did Gu Yue village elders debate?", 60),
         ]
 
         expected_hits = 0
         expected_total = 0
-        future_leaks = 0
         precision_scores: list[float] = []
 
         for q, expected_ch in eval_cases:
@@ -351,22 +339,15 @@ def test_curated_retrieval_evaluation_metrics(tmp_path: Path):
                 selected_document_ids=[rec.id],
                 scope=KnowledgeScope.SELECTED_DOCUMENTS,
             )
-            for p in res.passages:
-                if p.reading_position is not None and p.reading_position > 85:
-                    future_leaks += 1
-            if expected_ch is not None:
-                expected_total += 1
-                found_chs = [p.reading_position for p in res.passages]
-                if expected_ch in found_chs:
-                    expected_hits += 1
-                if res.passages:
-                    rel = sum(1 for p in res.passages if p.reading_position == expected_ch)
-                    precision_scores.append(rel / len(res.passages))
-            else:
-                # Spoiler-blocked queries must return 0 passages
-                assert not res.has_evidence
+            assert res.spoiler_warning is None
+            expected_total += 1
+            found_chs = [p.reading_position for p in res.passages]
+            if expected_ch in found_chs:
+                expected_hits += 1
+            if res.passages:
+                rel = sum(1 for p in res.passages if p.reading_position == expected_ch)
+                precision_scores.append(rel / len(res.passages))
 
-        assert future_leaks == 0
         assert expected_hits == expected_total
         assert sum(precision_scores) / len(precision_scores) > 0.0
     finally:

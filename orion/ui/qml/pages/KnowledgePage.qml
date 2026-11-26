@@ -753,10 +753,9 @@ Rectangle {
                                 Layout.fillWidth: true
                                 text: {
                                     if (!detailPane.doc) return ""
-                                    let p = "Chapters: " + (detailPane.doc.total_chapters || 0)
+                                    let p = "Chapters: " + (detailPane.doc.total_chapters || 0) + " · Whole book searchable"
                                     const dispCh = detailPane.doc.display_reading_chapter > 0 ? detailPane.doc.display_reading_chapter : detailPane.doc.current_reading_position
-                                    p += " · Progress: " + (dispCh > 0 ? ("Ch " + dispCh) : "Not set")
-                                    p += " · Policy: " + (detailPane.doc.reading_policy || "unconfigured")
+                                    if (dispCh > 0) p += " · Reading: Ch " + dispCh
                                     return p
                                 }
                                 font.pixelSize: 10
@@ -769,24 +768,19 @@ Rectangle {
                                 Layout.fillWidth: true
                                 spacing: 6
 
-                                ComboBox {
-                                    id: epubPolicyCombo
-                                    objectName: "epubPolicyCombo"
-                                    Layout.fillWidth: true
-                                    model: ["spoiler_safe", "chapter_range", "whole_document"]
-                                    currentIndex: {
-                                        if (!detailPane.doc) return 0
-                                        const idx = ["spoiler_safe", "chapter_range", "whole_document"].indexOf(detailPane.doc.reading_policy)
-                                        return idx >= 0 ? idx : 0
-                                    }
+                                Text {
+                                    text: "Reading Progress:"
+                                    font.pixelSize: 10
+                                    color: theme.textMuted
+                                    textFormat: Text.PlainText
                                 }
 
                                 TextField {
                                     id: epubPosInput
                                     objectName: "epubPosInput"
-                                    Layout.preferredWidth: 74
+                                    Layout.fillWidth: true
                                     implicitHeight: 30
-                                    placeholderText: "Ch #"
+                                    placeholderText: "Current Ch #"
                                     text: {
                                         if (!detailPane.doc) return ""
                                         const ch = detailPane.doc.display_chapter_number > 0 ? detailPane.doc.display_chapter_number : (detailPane.doc.display_reading_chapter > 0 ? detailPane.doc.display_reading_chapter : detailPane.doc.current_reading_position)
@@ -806,44 +800,13 @@ Rectangle {
                                     onClicked: {
                                         if (!detailPane.doc || typeof orion === "undefined" || orion === null) return
                                         const pos = parseInt(epubPosInput.text) || -1
-                                        const rStart = parseInt(epubRangeStartInput.text) || -1
-                                        const rEnd = parseInt(epubRangeEndInput.text) || -1
-                                        orion.setEpubReadingProgress(detailPane.doc.id, pos, epubPolicyCombo.currentText, rStart, rEnd)
+                                        orion.setEpubReadingProgress(detailPane.doc.id, pos, "whole_document", -1, -1)
                                     }
                                     background: Rectangle { radius: 6; color: theme.accent }
                                     contentItem: Text {
                                         text: parent.text; font.pixelSize: theme.fontXs; font.bold: true; color: theme.bgSurface
                                         horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; textFormat: Text.PlainText
                                     }
-                                }
-                            }
-
-                            RowLayout {
-                                visible: epubPolicyCombo.currentText === "chapter_range"
-                                Layout.fillWidth: true
-                                spacing: 6
-
-                                Text { text: "Range:"; font.pixelSize: 10; color: theme.textMuted }
-                                TextField {
-                                    id: epubRangeStartInput
-                                    Layout.fillWidth: true
-                                    implicitHeight: 28
-                                    placeholderText: "Start Ch"
-                                    text: (detailPane.doc && detailPane.doc.range_start > 0) ? String(detailPane.doc.range_start) : "1"
-                                    font.pixelSize: 10
-                                    color: theme.textPrimary
-                                    background: Rectangle { radius: 6; color: theme.bgSurfaceAlt; border.width: 1; border.color: theme.borderStrong }
-                                }
-                                Text { text: "to"; font.pixelSize: 10; color: theme.textMuted }
-                                TextField {
-                                    id: epubRangeEndInput
-                                    Layout.fillWidth: true
-                                    implicitHeight: 28
-                                    placeholderText: "End Ch"
-                                    text: (detailPane.doc && detailPane.doc.range_end > 0) ? String(detailPane.doc.range_end) : ""
-                                    font.pixelSize: 10
-                                    color: theme.textPrimary
-                                    background: Rectangle { radius: 6; color: theme.bgSurfaceAlt; border.width: 1; border.color: theme.borderStrong }
                                 }
                             }
 
@@ -905,7 +868,7 @@ Rectangle {
                                             const chTarget = modelData.display_chapter_number > 0 ? modelData.display_chapter_number : modelData.reading_position
                                             epubPosInput.text = String(chTarget)
                                             if (detailPane.doc && typeof orion !== "undefined" && orion !== null)
-                                                orion.setEpubReadingProgress(detailPane.doc.id, chTarget, "spoiler_safe", -1, -1)
+                                                orion.setEpubReadingProgress(detailPane.doc.id, chTarget, "whole_document", -1, -1)
                                         }
                                     }
 

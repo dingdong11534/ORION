@@ -265,7 +265,9 @@ class DocumentSourceModel(Base):
     total_chapters: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_reading_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     display_reading_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    reading_policy: Mapped[str] = mapped_column(String(32), nullable=False, default="unconfigured")
+    reading_policy: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="whole_document"
+    )
     range_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     range_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     progress_updated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)

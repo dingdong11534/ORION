@@ -572,7 +572,7 @@ class OrionBridge(QObject):
         try:
             policy = ReadingPolicy(reading_policy.strip().lower())
         except ValueError:
-            policy = ReadingPolicy.SPOILER_SAFE
+            policy = ReadingPolicy.WHOLE_DOCUMENT
 
         def _task(_token: CancellationToken) -> tuple[str, Any]:
             svc.update_reading_progress(

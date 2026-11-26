@@ -777,9 +777,7 @@ class AssistantService:
                         last_references=refs_payload,
                     )
                 if not retrieval.has_evidence:
-                    if retrieval.spoiler_warning:
-                        no_ev_msg = retrieval.spoiler_warning
-                    elif effective_scope == KnowledgeScope.SELECTED_DOCUMENTS and not clean_doc_ids:
+                    if effective_scope == KnowledgeScope.SELECTED_DOCUMENTS and not clean_doc_ids:
                         no_ev_msg = (
                             "No knowledge sources selected. Select one or more documents or "
                             "switch to Ask Knowledge mode to search all indexed documents."

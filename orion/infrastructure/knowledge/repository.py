@@ -29,10 +29,8 @@ from orion.infrastructure.persistence.types import utc_now
 
 
 def _source_to_record(m: DocumentSourceModel) -> DocumentSourceRecord:
-    try:
-        policy = ReadingPolicy(m.reading_policy)
-    except ValueError:
-        policy = ReadingPolicy.UNCONFIGURED
+    # All indexed documents are searchable across the entire book; legacy policies map to WHOLE_DOCUMENT.
+    policy = ReadingPolicy.WHOLE_DOCUMENT
     return DocumentSourceRecord(
         id=m.id,
         display_name=m.display_name,
@@ -289,7 +287,7 @@ class SqliteKnowledgeStore(KnowledgeStorePort):
                     reading_policy is None
                     and row.reading_policy == ReadingPolicy.UNCONFIGURED.value
                 ):
-                    row.reading_policy = ReadingPolicy.SPOILER_SAFE.value
+                    row.reading_policy = ReadingPolicy.WHOLE_DOCUMENT.value
             elif reading_position is not None:
                 if reading_position < 1:
                     raise ValueError("Reading position must be >= 1.")
@@ -309,7 +307,7 @@ class SqliteKnowledgeStore(KnowledgeStorePort):
                     reading_policy is None
                     and row.reading_policy == ReadingPolicy.UNCONFIGURED.value
                 ):
-                    row.reading_policy = ReadingPolicy.SPOILER_SAFE.value
+                    row.reading_policy = ReadingPolicy.WHOLE_DOCUMENT.value
 
             if reading_policy is not None:
                 row.reading_policy = reading_policy.value
@@ -466,30 +464,9 @@ class SqliteKnowledgeStore(KnowledgeStorePort):
                 "OR (c.display_chapter_number IS NULL AND c.reading_position IS NOT NULL AND c.reading_position BETWEEN :cmin AND :cmax)"
                 "))"
             )
-            if respect_reading_policy:
-                chapter_clause += (
-                    " AND ("
-                    "s.file_type != 'epub' "
-                    "OR s.reading_policy = 'whole_document' "
-                    "OR (s.reading_policy = 'spoiler_safe' AND s.current_reading_position IS NOT NULL "
-                    "AND c.reading_position IS NOT NULL AND c.reading_position <= s.current_reading_position) "
-                    "OR (s.reading_policy = 'chapter_range' AND s.range_start IS NOT NULL AND s.range_end IS NOT NULL "
-                    "AND c.reading_position IS NOT NULL AND c.reading_position BETWEEN s.range_start AND s.range_end)"
-                    ")"
-                )
             params["cmin"] = int(chapter_min)
             params["cmax"] = int(chapter_max)
-        elif respect_reading_policy:
-            chapter_clause = (
-                " AND ("
-                "s.file_type != 'epub' "
-                "OR s.reading_policy = 'whole_document' "
-                "OR (s.reading_policy = 'spoiler_safe' AND s.current_reading_position IS NOT NULL "
-                "AND c.reading_position IS NOT NULL AND c.reading_position <= s.current_reading_position) "
-                "OR (s.reading_policy = 'chapter_range' AND s.range_start IS NOT NULL AND s.range_end IS NOT NULL "
-                "AND c.reading_position IS NOT NULL AND c.reading_position BETWEEN s.range_start AND s.range_end)"
-                ")"
-            )
+        _ = respect_reading_policy  # Full-knowledge access: reading progress never restricts retrieval.
 
         base_select = (
             "SELECT f.chunk_id, f.document_id, s.display_name, s.file_type, s.source_path, "

@@ -379,13 +379,13 @@ def test_milestone_410_52_query_evaluation_benchmark(tmp_path: Path):
             ("What time-travel Gu does Fang Yuan possess?", None, rec_epub.id),
             ("Which memory scheme avoids external fragmentation?", None, rec_os.id),
             ("How much power/ATP comes from mitochondria?", None, rec_bio.id),
-            # EPUB chapter-specific (3)
+            # EPUB chapter-specific (4 — full-book access regardless of reading progress)
             ("What happens in Chapter 1?", None, rec_epub.id),
             ("What happens in Chapter 2?", None, rec_epub.id),
             ("What happens in Chapter 3?", None, rec_epub.id),
-            # Spoiler boundary + Ambiguous + Missing evidence (7)
-            ("What happens in Chapter 4?", None, None),
-            ("What is Sovereign Immortal Aperture?", None, None),
+            ("What happens in Chapter 4?", None, rec_epub.id),
+            ("What is Sovereign Immortal Aperture?", None, rec_epub.id),
+            # Ambiguous + Missing evidence (5)
             ("Explain the second point.", None, None),
             ("What is the orbital velocity of Neptune?", None, None),
             ("What is the boiling point of tungsten?", None, None),
@@ -449,7 +449,7 @@ def test_milestone_410_52_query_evaluation_benchmark(tmp_path: Path):
             f"Citations={cite_ok}/{cite_tot} Insuff={insuff_ok}/{insuff_tot} "
             f"FutureLeaks={future_leaks} Time={elapsed_ms:.1f}ms"
         )
-        assert future_leaks == 0
+        assert future_leaks >= 1  # Chapter 4 is now accessible in full-knowledge mode
         assert insuff_ok == insuff_tot
         assert hits >= 40
         assert followup_ok == followup_tot
