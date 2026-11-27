@@ -239,11 +239,49 @@ def main() -> int:
         )
 
         # 7b. Construct offline voice service (lazy model loading + idle unload)
+        from orion.application.session.interaction_session import InteractionSession, SessionState
         from orion.application.voice.heavy_work_gate import HeavyWorkGate
+        from orion.application.voice.interaction_machine import (
+            VoiceInteractionMachine,
+            VoiceInteractionState,
+        )
         from orion.application.voice.voice_service import VoiceService
         from orion.infrastructure.voice.audio_io import PipeWireAudioInput, PipeWireAudioOutput
         from orion.infrastructure.voice.piper_tts import PiperTtsAdapter
+        from orion.infrastructure.voice.wake_word import (
+            LocalSpeakerVerifier,
+            VoskWakeWordListener,
+        )
         from orion.infrastructure.voice.whispercpp_stt import WhisperCppSttAdapter
+
+        speaker_verifier = LocalSpeakerVerifier()
+        wake_word_listener = VoskWakeWordListener(phrase="hey orion")
+        voice_machine = VoiceInteractionMachine(
+            initial_state=(
+                VoiceInteractionState.ORB_STANDBY
+                if wake_word_listener.is_available()
+                else VoiceInteractionState.MICROPHONE_ERROR
+            )
+        )
+        interaction_session = InteractionSession(
+            enabled=True,
+            wake_word=wake_word_listener,
+            speaker_verifier=speaker_verifier,
+        )
+
+        def _on_ptt_active(active: bool) -> None:
+            if active:
+                wake_word_listener.pause_for_ptt()
+                try:
+                    voice_machine.transition(
+                        VoiceInteractionState.COMMAND_CAPTURE, reason="push_to_talk"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Voice state transition skipped on PTT: %s", exc)
+            else:
+                if interaction_session.state == SessionState.LOCKED:
+                    wake_word_listener.resume_after_ptt()
+                voice_machine.return_to_standby(reason="ptt_finished")
 
         voice_service = VoiceService(
             stt=WhisperCppSttAdapter(),
@@ -251,6 +289,8 @@ def main() -> int:
             audio_in=PipeWireAudioInput(),
             audio_out=PipeWireAudioOutput(),
             gate=HeavyWorkGate(),
+            on_ptt_active_changed=_on_ptt_active,
+            on_tts_active_changed=wake_word_listener.suppress_wake_for_playback,
         )
 
         from orion.application.identity.capabilities import CapabilityRegistry
@@ -296,14 +336,12 @@ def main() -> int:
 
         from orion.application.jobs.supervisor import BackgroundJobSupervisor
         from orion.application.launcher.app_registry import ApplicationRegistryService
-        from orion.application.session.interaction_session import InteractionSession
         from orion.infrastructure.browser.playwright_browser_service import PlaywrightBrowserService
         from orion.infrastructure.downloads.inbox_service import OrionInboxService
         from orion.infrastructure.jobs.repository import SqliteBackgroundJobStore
 
         job_store = SqliteBackgroundJobStore(session_factory)
         job_supervisor = BackgroundJobSupervisor(job_store)
-        interaction_session = InteractionSession(enabled=True)
         browser_service = PlaywrightBrowserService()
         app_registry = ApplicationRegistryService(session_factory, audit_store=job_store)
         app_registry.detect_default_apps()
@@ -322,6 +360,36 @@ def main() -> int:
             interaction_session=interaction_session,
             job_store=job_store,
             job_supervisor=job_supervisor,
+            voice_machine=voice_machine,
+        )
+
+        def _on_wake_phrase() -> None:
+            interaction_session.on_wake_detected()
+            # Never unlocks on wake-word alone; requires enrolled owner verification.
+            interaction_session.verify_and_unlock(b"")
+            try:
+                voice_machine.transition(
+                    VoiceInteractionState.WAKE_ACKNOWLEDGEMENT, reason="wake_detected"
+                )
+                voice_machine.transition(
+                    VoiceInteractionState.COMMAND_CAPTURE, reason="capturing_utterance"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Voice state transition skipped on wake: %s", exc)
+            bridge.notify_wake_word_detected()
+
+        def _on_wake_error(err: str) -> None:
+            logger.warning("Wake-word listener error: %s", err)
+            try:
+                voice_machine.transition(VoiceInteractionState.MICROPHONE_ERROR, error_reason=err)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Voice state transition skipped on wake: %s", exc)
+            bridge.refreshWakeWordDiagnostics()
+
+        wake_word_listener.set_callbacks(
+            on_detected=_on_wake_phrase,
+            on_command_captured=bridge.handle_captured_voice_command,
+            on_error=_on_wake_error,
         )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,
@@ -361,9 +429,31 @@ def main() -> int:
 
         if "--background" in sys.argv[1:]:
             bridge.setBackgroundMode(True)
+            app.setQuitOnLastWindowClosed(False)
+            voice_machine.set_window_visible(False)
+        else:
+            voice_machine.set_window_visible(True)
+            voice_machine.return_to_standby(reason="startup_full_window")
+
+        def _on_bg_changed(bg: bool) -> None:
+            app.setQuitOnLastWindowClosed(not bg)
+            voice_machine.set_window_visible(not bg)
+            voice_machine.return_to_standby(reason="presentation_changed")
+
+        bridge.backgroundModeChanged.connect(_on_bg_changed)
 
         return app.exec()
     finally:
+        if "interaction_session" in locals() and interaction_session is not None:
+            try:
+                interaction_session.shutdown()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        if "voice_service" in locals() and voice_service is not None:
+            try:
+                voice_service.cancel_recording()
+            except Exception:  # noqa: BLE001, S110
+                pass
         if "browser_service" in locals() and browser_service is not None:
             try:
                 browser_service.close_browser()

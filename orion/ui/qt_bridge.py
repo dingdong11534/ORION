@@ -186,6 +186,13 @@ class OrionBridge(QObject):
     sessionStateChanged = Signal(str)
     backgroundModeChanged = Signal(bool)
     backgroundJobsLoaded = Signal(list)
+    wakeWordDetected = Signal()
+    wakeWordDiagnosticsChanged = Signal()
+    conversationSidebarWidthChanged = Signal(int)
+    navSidebarWidthChanged = Signal(int)
+    voiceMachineChanged = Signal()
+    voiceCommandResult = Signal(str, str)
+    voiceNavigationRequested = Signal(str)
 
     def __init__(
         self,
@@ -206,6 +213,7 @@ class OrionBridge(QObject):
         interaction_session: Any = None,
         job_store: Any = None,
         job_supervisor: Any = None,
+        voice_machine: Any = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
@@ -236,17 +244,36 @@ class OrionBridge(QObject):
         self._job_store: Any = job_store
         self._job_supervisor: Any = job_supervisor
         self._background_mode: bool = False
+        from orion.application.voice.intent_router import VoiceIntentRouter
+        from orion.application.voice.interaction_machine import VoiceInteractionMachine
+
+        self._voice_machine: VoiceInteractionMachine = voice_machine or VoiceInteractionMachine()
+        self._intent_router = VoiceIntentRouter()
+        self._last_voice_command: str = ""
+        self._last_voice_response: str = ""
+        self._tts_muted: bool = False
+        self._voice_machine.add_listener(lambda _st: self.voiceMachineChanged.emit())
         if self._interaction_session is not None:
             self._interaction_session.add_listener(
                 lambda state: self.sessionStateChanged.emit(str(state))
             )
         self._voice_state: str = "idle"
         self._theme_mode: str = "light"
+        self._conversation_sidebar_width: int = 268
+        self._nav_sidebar_width: int = 208
         if getattr(self._service, "_settings_store", None) is not None:
             try:
                 saved_theme = self._service._settings_store.get_setting("ui_theme_mode")
                 if saved_theme in ("light", "dark", "system"):
                     self._theme_mode = saved_theme
+                saved_cw = self._service._settings_store.get_setting(
+                    "ui_conversation_sidebar_width"
+                )
+                if saved_cw and saved_cw.isdigit():
+                    self._conversation_sidebar_width = max(220, min(420, int(saved_cw)))
+                saved_nw = self._service._settings_store.get_setting("ui_nav_sidebar_width")
+                if saved_nw and saved_nw.isdigit():
+                    self._nav_sidebar_width = max(160, min(280, int(saved_nw)))
                 if self._voice_service is not None:
                     v_en = self._service._settings_store.get_setting("voice_enabled")
                     v_as = self._service._settings_store.get_setting("voice_auto_speak")
@@ -1409,6 +1436,15 @@ class OrionBridge(QObject):
             if tag == "voice_spoken":
                 self._set_voice_state("idle")
                 return
+            if tag == "voice_command_done":
+                _, cmd_text, resp_text = result
+                self._last_voice_command = cmd_text
+                self._last_voice_response = resp_text
+                self.voiceMachineChanged.emit()
+                self.wakeWordDiagnosticsChanged.emit()
+                if cmd_text or resp_text:
+                    self.voiceCommandResult.emit(cmd_text, resp_text)
+                return
             if tag == "voice_error":
                 _, code, msg = result
                 self._set_voice_state("idle")
@@ -2134,27 +2170,305 @@ class OrionBridge(QObject):
             return "locked"
         return str(self._interaction_session.state)
 
+    @Property(str, notify=sessionStateChanged)
+    def wakeWordStatus(self) -> str:
+        if self._interaction_session is None:
+            return "Wake-word listener not configured"
+        return self._interaction_session.wake_word_status()
+
+    @Property(str, notify=sessionStateChanged)
+    def speakerVerificationStatus(self) -> str:
+        if self._interaction_session is None:
+            return "Voice unlock disabled"
+        return self._interaction_session.speaker_verification_status()
+
     @Property(bool, notify=backgroundModeChanged)
     def backgroundMode(self) -> bool:
         return self._background_mode
 
+    @Property(int, notify=conversationSidebarWidthChanged)
+    def conversationSidebarWidth(self) -> int:
+        return self._conversation_sidebar_width
+
+    @Property(int, notify=navSidebarWidthChanged)
+    def navSidebarWidth(self) -> int:
+        return self._nav_sidebar_width
+
+    @Property("QVariantMap", notify=wakeWordDiagnosticsChanged)
+    def wakeWordDiagnostics(self) -> dict[str, Any]:
+        ww = getattr(self._interaction_session, "_wake_word", None)
+        base = (
+            dict(ww.get_diagnostics())
+            if ww is not None and hasattr(ww, "get_diagnostics")
+            else {
+                "input_source": "none",
+                "capture_status": "unavailable",
+                "sample_rate": 16000,
+                "channels": 1,
+                "current_rms": 0.0,
+                "model_status": "missing",
+                "model_path": "",
+                "thread_alive": False,
+                "command_capturing": False,
+                "paused_by_user": False,
+                "last_wake_at": "",
+                "last_init_at": "",
+                "last_error": "Wake-word listener not configured",
+            }
+        )
+        stt_ok = bool(self._voice_service and self._voice_service._stt.is_model_available())
+        tts_ok = bool(self._voice_service and self._voice_service._tts.is_model_available())
+        base["whisper_available"] = stt_ok
+        base["piper_available"] = tts_ok
+        base["command_state"] = str(self._voice_machine.state)
+        base["last_transcript"] = self._last_voice_command
+        return base
+
+    @Property(str, notify=voiceMachineChanged)
+    def voiceMachineState(self) -> str:
+        return str(self._voice_machine.state)
+
+    @Property(str, notify=voiceMachineChanged)
+    def micIndicatorState(self) -> str:
+        return str(self._voice_machine.mic_indicator_state())
+
+    @Property(str, notify=voiceMachineChanged)
+    def micStatusText(self) -> str:
+        return self._voice_machine.mic_status_description()
+
+    @Property(str, notify=voiceMachineChanged)
+    def lastVoiceCommand(self) -> str:
+        return self._last_voice_command
+
+    @Property(str, notify=voiceMachineChanged)
+    def lastVoiceResponse(self) -> str:
+        return self._last_voice_response
+
+    @Property(bool, notify=voiceMachineChanged)
+    def ttsMuted(self) -> bool:
+        return self._tts_muted
+
+    @Slot(bool)
+    def setTtsMuted(self, muted: bool) -> None:
+        val = bool(muted)
+        if self._tts_muted != val:
+            self._tts_muted = val
+            if val and self._voice_service is not None:
+                self._voice_service.cancel_playback()
+            self.voiceMachineChanged.emit()
+
+    @Slot()
+    def pauseVoiceListening(self) -> None:
+        from orion.application.voice.interaction_machine import VoiceInteractionState
+
+        ww = getattr(self._interaction_session, "_wake_word", None)
+        if ww is not None and hasattr(ww, "pause_by_user"):
+            ww.pause_by_user()
+        self._voice_machine.transition(
+            VoiceInteractionState.MICROPHONE_PAUSED, reason="user_paused"
+        )
+        self.wakeWordDiagnosticsChanged.emit()
+
+    @Slot()
+    def resumeVoiceListening(self) -> None:
+        from orion.application.voice.interaction_machine import VoiceInteractionState
+
+        ww = getattr(self._interaction_session, "_wake_word", None)
+        if ww is None or not ww.is_available():
+            self._voice_machine.transition(
+                VoiceInteractionState.MICROPHONE_ERROR,
+                error_reason="Wake-word listener or microphone unavailable.",
+            )
+            self.wakeWordDiagnosticsChanged.emit()
+            return
+        try:
+            if hasattr(ww, "resume_by_user"):
+                ww.resume_by_user()
+            else:
+                ww.start()
+            self._voice_machine.return_to_standby(reason="user_resumed")
+        except Exception as exc:  # noqa: BLE001
+            self._voice_machine.transition(
+                VoiceInteractionState.MICROPHONE_ERROR,
+                error_reason=str(exc),
+            )
+        self.wakeWordDiagnosticsChanged.emit()
+
+    @Slot()
+    def toggleVoiceListening(self) -> None:
+        from orion.application.voice.interaction_machine import VoiceInteractionState
+
+        if self._voice_machine.state == VoiceInteractionState.MICROPHONE_PAUSED:
+            self.resumeVoiceListening()
+        else:
+            self.pauseVoiceListening()
+
+    @Slot()
+    def retryVoiceMicrophone(self) -> None:
+        self.resumeVoiceListening()
+
+    @Slot()
+    def testWakeDetection(self) -> None:
+        self.notify_wake_word_detected()
+
+    @Slot()
+    def testSpokenResponse(self) -> None:
+        if self._voice_service is None or self._tts_muted:
+            return
+        self.speakMessage("ORION voice output is ready.")
+
+    def handle_captured_voice_command(self, pcm_s16le: bytes) -> None:
+        """Process a captured voice utterance on a worker thread (STT -> Intent/Assistant -> TTS)."""
+        from orion.application.voice.intent_router import VoiceIntentKind
+        from orion.application.voice.interaction_machine import VoiceInteractionState
+
+        def _run() -> tuple[str, ...]:
+            try:
+                self._voice_machine.transition(
+                    VoiceInteractionState.COMMAND_PROCESSING, reason="transcribing"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Voice state transition skipped on processing: %s", exc)
+            if self._voice_service is None:
+                self._voice_machine.return_to_standby(reason="no_voice_service")
+                return ("voice_command_done", "", "")
+            try:
+                res = self._voice_service.transcribe_pcm_bytes(pcm_s16le)
+                transcript = res.text
+            except Exception as exc:  # noqa: BLE001
+                self._voice_machine.return_to_standby(reason="empty_or_failed_stt")
+                return ("voice_error", str(getattr(exc, "code", "transcription_failed")), str(exc))
+
+            intent = self._intent_router.classify(transcript)
+            if intent.is_duplicate:
+                self._voice_machine.return_to_standby(reason="duplicate_suppressed")
+                return ("voice_command_done", transcript, "")
+
+            if intent.kind == VoiceIntentKind.PAUSE_LISTENING:
+                self.pauseVoiceListening()
+                return ("voice_command_done", transcript, "Microphone paused.")
+
+            if intent.kind in (
+                VoiceIntentKind.OPEN_HOME,
+                VoiceIntentKind.OPEN_CHAT,
+                VoiceIntentKind.OPEN_KNOWLEDGE,
+                VoiceIntentKind.OPEN_WORKSPACE,
+                VoiceIntentKind.OPEN_PRODUCTIVITY,
+                VoiceIntentKind.MINIMIZE_TO_ORB,
+                VoiceIntentKind.SHOW_MAIN_WINDOW,
+            ):
+                self.voiceNavigationRequested.emit(intent.kind.value)
+                reply = f"Done: {intent.kind.value.replace('_', ' ')}."
+                self._speak_if_enabled(reply)
+                return ("voice_command_done", transcript, reply)
+
+            if intent.kind == VoiceIntentKind.AMBIGUOUS:
+                reply = intent.clarification_prompt
+                self._speak_if_enabled(reply)
+                return ("voice_command_done", transcript, reply)
+
+            # Conversational / Productivity / Knowledge request via existing AssistantService
+            try:
+                assistant_resp = self._service.send_message(intent.normalized_text)
+                reply_text = (assistant_resp.text or "").strip()
+            except Exception as exc:  # noqa: BLE001
+                reply_text = f"Unable to process request: {exc}"
+            if reply_text:
+                self._speak_if_enabled(reply_text[:400])
+            return ("voice_command_done", transcript, reply_text)
+
+        self._start_worker(generate_request_id(), _run)
+
+    def _speak_if_enabled(self, text: str) -> None:
+        from orion.application.voice.interaction_machine import VoiceInteractionState
+
+        if not text or self._voice_service is None or self._tts_muted:
+            self._voice_machine.return_to_standby(reason="tts_skipped")
+            return
+        if (
+            not self._voice_service.settings.enabled
+            or not self._voice_service._tts.is_model_available()
+        ):
+            self._voice_machine.return_to_standby(reason="tts_unavailable")
+            return
+        try:
+            self._voice_machine.transition(
+                VoiceInteractionState.RESPONDING, reason="speaking_response"
+            )
+            self._voice_service.speak_text(text)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Spoken response failed: %s", exc)
+        finally:
+            self._voice_machine.return_to_standby(reason="response_finished")
+
+    def notify_wake_word_detected(self) -> None:
+        """Thread-safe hook called when 'Hey ORION' is recognized."""
+        self.wakeWordDetected.emit()
+        self.wakeWordDiagnosticsChanged.emit()
+
+    @Slot()
+    def refreshWakeWordDiagnostics(self) -> None:
+        self.wakeWordDiagnosticsChanged.emit()
+
+    @Slot()
+    def testWakeWordMicrophone(self) -> None:
+        ww = getattr(self._interaction_session, "_wake_word", None)
+        if ww is None or not hasattr(ww, "test_microphone_rms"):
+            return
+        try:
+            ww.test_microphone_rms(0.4)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Microphone test failed: %s", exc)
+        self.wakeWordDiagnosticsChanged.emit()
+
+    @Slot(int)
+    def setConversationSidebarWidth(self, width: int) -> None:
+        clamped = max(220, min(420, int(width)))
+        if self._conversation_sidebar_width != clamped:
+            self._conversation_sidebar_width = clamped
+            self.conversationSidebarWidthChanged.emit(clamped)
+        if getattr(self._service, "_settings_store", None) is not None:
+            try:
+                self._service._settings_store.set_setting(
+                    "ui_conversation_sidebar_width", str(clamped)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist conversation sidebar width: %s", exc)
+
+    @Slot(int)
+    def setNavSidebarWidth(self, width: int) -> None:
+        clamped = max(160, min(280, int(width)))
+        if self._nav_sidebar_width != clamped:
+            self._nav_sidebar_width = clamped
+            self.navSidebarWidthChanged.emit(clamped)
+        if getattr(self._service, "_settings_store", None) is not None:
+            try:
+                self._service._settings_store.set_setting("ui_nav_sidebar_width", str(clamped))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist nav sidebar width: %s", exc)
+
     @Slot()
     def lockSession(self) -> None:
         if self._interaction_session is not None:
+            logger.info("UI requested manual session lock")
             self._interaction_session.lock()
 
     @Slot()
     def unlockSessionManual(self) -> None:
         if self._interaction_session is not None:
+            logger.info("UI requested manual session unlock")
             self._interaction_session.unlock_manual()
 
     @Slot()
     def toggleSessionLock(self) -> None:
         if self._interaction_session is None:
+            logger.warning("toggleSessionLock called without InteractionSession")
             return
         from orion.application.session.interaction_session import SessionState
 
-        if self._interaction_session.state == SessionState.UNLOCKED:
+        cur = self._interaction_session.state
+        logger.info("UI toggleSessionLock invoked (current=%s)", cur)
+        if cur == SessionState.UNLOCKED:
             self._interaction_session.lock()
         else:
             self._interaction_session.unlock_manual()
@@ -2163,6 +2477,7 @@ class OrionBridge(QObject):
     def setBackgroundMode(self, enabled: bool) -> None:
         val = bool(enabled)
         if self._background_mode != val:
+            logger.info("UI setBackgroundMode -> %s", val)
             self._background_mode = val
             self.backgroundModeChanged.emit(val)
 

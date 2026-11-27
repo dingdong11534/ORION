@@ -48,14 +48,15 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
-        // Conversation list panel (hidden below 1000px to keep chat spacious)
+        // Conversation list panel (resizable, adaptive down to 760px chatPage width)
         Rectangle {
-            visible: chatPage.width >= 980
-            Layout.preferredWidth: 236
+            id: conversationSidebar
+            objectName: "conversationSidebar"
+            property int customConvWidth: (typeof orion !== "undefined" && orion !== null) ? orion.conversationSidebarWidth : 268
+            visible: chatPage.width >= 760
+            Layout.preferredWidth: Math.max(220, Math.min(Math.min(400, Math.floor(chatPage.width * 0.42)), customConvWidth))
             Layout.fillHeight: true
             color: Theme.sidebar
-            border.width: 1
-            border.color: Theme.hairline
 
             ColumnLayout {
                 anchors.fill: parent
@@ -81,6 +82,8 @@ Rectangle {
                 }
 
                 ListView {
+                    id: conversationsListView
+                    objectName: "conversationsListView"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
@@ -88,35 +91,182 @@ Rectangle {
                     model: chatPage.conversationsModel
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-                    delegate: RowLayout {
+                    delegate: Rectangle {
+                        id: convRow
+                        objectName: "conversationRow"
                         width: ListView.view.width
-                        spacing: Theme.spaceXs
+                        height: rowCol.implicitHeight + Theme.spaceSm * 2
+                        radius: Theme.radiusControl
+                        readonly property bool isSelected: model.id === root.activeConversationId
+                        property bool editingTitle: false
+                        property bool saveInFlight: false
+                        color: isSelected
+                            ? Theme.window
+                            : (rowHover.hovered ? Theme.surface : "transparent")
+                        border.width: isSelected ? 1 : 0
+                        border.color: Theme.hairline
 
-                        OrionListRow {
-                            Layout.fillWidth: true
-                            title: model.title || "New Conversation"
-                            subtitle: model.relative_time || ""
-                            selected: model.id === root.activeConversationId
+                        Behavior on color { ColorAnimation { duration: Theme.motionMs } }
+
+                        Rectangle {
+                            visible: convRow.isSelected
+                            width: 3
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.topMargin: 5
+                            anchors.bottomMargin: 5
+                            radius: 2
+                            color: Theme.accent
+                        }
+
+                        HoverHandler { id: rowHover }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            visible: !convRow.editingTitle
+                            acceptedButtons: Qt.LeftButton
                             onClicked: {
                                 if (typeof orion !== "undefined" && orion !== null)
                                     orion.selectConversation(model.id)
                             }
                         }
 
-                        OrionButton {
-                            text: "Rename"
-                            variant: "quiet"
-                            compact: true
-                            onClicked: root.openRenameDialog(model.id, model.title || "")
-                        }
+                        RowLayout {
+                            id: rowCol
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.leftMargin: Theme.spaceMd
+                            anchors.rightMargin: Theme.spaceXs
+                            spacing: Theme.spaceXs
 
-                        OrionButton {
-                            text: "×"
-                            variant: "quiet"
-                            compact: true
-                            onClicked: root.confirmDeleteConversation(model.id, model.title || "Conversation")
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                visible: !convRow.editingTitle
+
+                                Text {
+                                    id: convTitleText
+                                    objectName: "conversationTitleText"
+                                    Layout.fillWidth: true
+                                    text: model.title || "New Conversation"
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontSecondary
+                                    font.weight: convRow.isSelected ? Font.Medium : Font.Normal
+                                    color: Theme.text
+                                    elide: Text.ElideRight
+                                    textFormat: Text.PlainText
+
+                                    ToolTip.visible: rowHover.hovered && truncated
+                                    ToolTip.text: model.title || "New Conversation"
+                                    ToolTip.delay: 400
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: (model.relative_time || "").length > 0
+                                    text: model.relative_time || ""
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontCaption
+                                    color: Theme.textSecondary
+                                    elide: Text.ElideRight
+                                    textFormat: Text.PlainText
+                                }
+                            }
+
+                            OrionTextField {
+                                id: inlineRenameField
+                                objectName: "inlineRenameField"
+                                Layout.fillWidth: true
+                                visible: convRow.editingTitle
+                                text: model.title || ""
+                                placeholderText: "Conversation title"
+                                function commitRename() {
+                                    if (convRow.saveInFlight) return
+                                    const trimmed = inlineRenameField.text.trim()
+                                    if (trimmed.length === 0) {
+                                        convRow.editingTitle = false
+                                        return
+                                    }
+                                    convRow.saveInFlight = true
+                                    convRow.editingTitle = false
+                                    if (typeof orion !== "undefined" && orion !== null)
+                                        orion.renameConversation(model.id, trimmed)
+                                    convRow.saveInFlight = false
+                                }
+                                Keys.onReturnPressed: commitRename()
+                                Keys.onEnterPressed: commitRename()
+                                Keys.onEscapePressed: { convRow.editingTitle = false }
+                            }
+
+                            OrionButton {
+                                id: convMenuButton
+                                objectName: "convMenuButton"
+                                visible: !convRow.editingTitle && (rowHover.hovered || convRow.isSelected || convOverflowMenu.visible)
+                                text: "⋯"
+                                variant: "quiet"
+                                compact: true
+                                implicitWidth: 28
+                                onClicked: convOverflowMenu.open()
+
+                                Menu {
+                                    id: convOverflowMenu
+                                    objectName: "convOverflowMenu"
+                                    MenuItem {
+                                        objectName: "convRenameMenuItem"
+                                        text: "Rename"
+                                        onTriggered: {
+                                            convRow.saveInFlight = false
+                                            inlineRenameField.text = model.title || ""
+                                            convRow.editingTitle = true
+                                            inlineRenameField.forceActiveFocus()
+                                            inlineRenameField.selectAll()
+                                        }
+                                    }
+                                    MenuItem {
+                                        objectName: "convDeleteMenuItem"
+                                        text: "Delete"
+                                        onTriggered: root.confirmDeleteConversation(model.id, model.title || "Conversation")
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+            }
+        }
+
+        // Resizable vertical divider between conversation list and chat area
+        Rectangle {
+            id: conversationDivider
+            objectName: "conversationDivider"
+            visible: conversationSidebar.visible
+            Layout.preferredWidth: 5
+            Layout.fillHeight: true
+            color: dividerMa.containsMouse || dividerMa.pressed ? Theme.border : Theme.hairline
+
+            MouseArea {
+                id: dividerMa
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.SplitHCursor
+                property real startX: 0
+                property int startWidth: 268
+                onPressed: function(mouse) {
+                    startX = mapToGlobal(mouse.x, mouse.y).x
+                    startWidth = conversationSidebar.Layout.preferredWidth
+                }
+                onPositionChanged: function(mouse) {
+                    if (pressed) {
+                        const dx = mapToGlobal(mouse.x, mouse.y).x - startX
+                        const maxW = Math.min(400, Math.floor(chatPage.width * 0.42))
+                        conversationSidebar.customConvWidth = Math.max(220, Math.min(maxW, Math.round(startWidth + dx)))
+                    }
+                }
+                onReleased: {
+                    if (typeof orion !== "undefined" && orion !== null)
+                        orion.setConversationSidebarWidth(conversationSidebar.customConvWidth)
                 }
             }
         }
@@ -215,7 +365,7 @@ Rectangle {
                 }
 
                 OrionButton {
-                    visible: chatPage.width < 980
+                    visible: !conversationSidebar.visible
                     text: "+ New Chat"
                     variant: "secondary"
                     compact: true

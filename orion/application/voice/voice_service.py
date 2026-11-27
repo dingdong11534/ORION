@@ -44,6 +44,8 @@ class VoiceService:
         audio_out: AudioOutputPort,
         gate: HeavyWorkGate | None = None,
         settings: VoiceSettings | None = None,
+        on_ptt_active_changed: Callable[[bool], None] | None = None,
+        on_tts_active_changed: Callable[[bool], None] | None = None,
     ) -> None:
         self._stt = stt
         self._tts = tts
@@ -51,6 +53,8 @@ class VoiceService:
         self._audio_out = audio_out
         self._gate = gate or HeavyWorkGate()
         self._settings = settings or VoiceSettings()
+        self._on_ptt_active_changed = on_ptt_active_changed
+        self._on_tts_active_changed = on_tts_active_changed
         self._state = VoiceState.IDLE
         self._lock = threading.Lock()
         self._cancel_flag = threading.Event()
@@ -120,8 +124,10 @@ class VoiceService:
                 VoiceErrorCode.MICROPHONE_UNAVAILABLE,
                 "No microphone capture device is available.",
             )
-        # Starting a recording always stops active playback
+        # Starting a recording always stops active playback and pauses wake-word listener
         self.cancel_playback()
+        if self._on_ptt_active_changed is not None:
+            self._on_ptt_active_changed(True)
         self._cancel_flag.clear()
 
         fd, tmp_name = tempfile.mkstemp(prefix="orion_rec_", suffix=".wav")
@@ -133,6 +139,8 @@ class VoiceService:
         try:
             self._audio_in.start_recording(wav_path, device=self._settings.input_device)
         except Exception as exc:
+            if self._on_ptt_active_changed is not None:
+                self._on_ptt_active_changed(False)
             raise VoiceServiceError(
                 VoiceErrorCode.DEVICE_ERROR, f"Microphone capture error: {exc}"
             ) from exc
@@ -153,6 +161,8 @@ class VoiceService:
                 self._state = VoiceState.IDLE
             if wav is not None:
                 wav.unlink(missing_ok=True)
+            if self._on_ptt_active_changed is not None:
+                self._on_ptt_active_changed(False)
 
     def stop_recording_and_transcribe(self) -> TranscriptionResult:
         with self._lock:
@@ -192,6 +202,51 @@ class VoiceService:
             with self._lock:
                 self._recording_wav = None
                 self._state = VoiceState.IDLE
+            if self._on_ptt_active_changed is not None:
+                self._on_ptt_active_changed(False)
+
+    def transcribe_pcm_bytes(
+        self, pcm_s16le: bytes, *, sample_rate: int = 16000
+    ) -> TranscriptionResult:
+        """Transcribe an in-memory 16kHz s16le PCM utterance using WhisperCpp under HeavyWorkGate."""
+        if not self._stt.is_model_available():
+            raise VoiceServiceError(
+                VoiceErrorCode.MODEL_MISSING,
+                "Offline speech-to-text model is missing.",
+            )
+        if len(pcm_s16le) < 640:
+            raise VoiceServiceError(
+                VoiceErrorCode.EMPTY_TRANSCRIPTION,
+                "Captured utterance was too short.",
+            )
+        import io
+        import wave
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sample_rate)
+            w.writeframes(pcm_s16le)
+
+        with tempfile.NamedTemporaryFile(prefix="orion_cmd_", suffix=".wav", delete=False) as tf:
+            wav_path = Path(tf.name)
+            tf.write(buf.getvalue())
+        try:
+            dur = len(pcm_s16le) / float(sample_rate * 2)
+            with self._gate.acquire("stt"):
+                self._tts.unload()
+                text = self._stt.transcribe(wav_path).strip()
+            self._last_used_at = time.monotonic()
+            self._schedule_idle_unload()
+            if not text:
+                raise VoiceServiceError(
+                    VoiceErrorCode.EMPTY_TRANSCRIPTION,
+                    "No speech was detected in the command.",
+                )
+            return TranscriptionResult(text=text, duration_seconds=dur)
+        finally:
+            wav_path.unlink(missing_ok=True)
 
     def speak_text(
         self,
@@ -212,6 +267,8 @@ class VoiceService:
 
         self.cancel_playback()
         self._cancel_flag.clear()
+        if self._on_tts_active_changed is not None:
+            self._on_tts_active_changed(True)
         with self._lock:
             self._state = VoiceState.SPEAKING
 
@@ -247,6 +304,8 @@ class VoiceService:
         finally:
             with self._lock:
                 self._state = VoiceState.IDLE
+            if self._on_tts_active_changed is not None:
+                self._on_tts_active_changed(False)
 
     def cancel_playback(self) -> None:
         self._cancel_flag.set()

@@ -1,10 +1,60 @@
 """PipeWire / ALSA subprocess audio capture and playback adapters."""
 
+import math
 import shutil
 import signal
+import struct
 import subprocess
 import threading
+import wave
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True, slots=True)
+class WavAudioStats:
+    """Metadata and signal amplitude summary for a captured WAV file."""
+
+    sample_rate: int
+    channels: int
+    sample_width: int
+    nframes: int
+    duration_seconds: float
+    rms: float
+    peak: int
+    file_size: int
+
+
+def measure_wav_stats(wav_path: Path) -> WavAudioStats:
+    """Validate WAV format and measure duration, RMS, and peak amplitude."""
+    if not wav_path.is_file() or wav_path.stat().st_size <= 44:
+        raise RuntimeError(f"Captured audio file is empty or missing: {wav_path}")
+    with wave.open(str(wav_path), "rb") as w:
+        rate = w.getframerate()
+        ch = w.getnchannels()
+        width = w.getsampwidth()
+        nframes = w.getnframes()
+        frames = w.readframes(nframes)
+    if rate != 16000 or ch != 1 or width != 2:
+        raise RuntimeError(
+            f"Unexpected WAV format: rate={rate}, channels={ch}, sample_width={width}"
+        )
+    if nframes == 0 or len(frames) < 2:
+        raise RuntimeError("Captured WAV contains 0 audio frames.")
+    count = len(frames) // 2
+    samples = struct.unpack(f"<{count}h", frames[: count * 2])
+    rms = math.sqrt(sum(s * s for s in samples) / count)
+    peak = max(abs(s) for s in samples)
+    return WavAudioStats(
+        sample_rate=rate,
+        channels=ch,
+        sample_width=width,
+        nframes=nframes,
+        duration_seconds=nframes / float(rate),
+        rms=rms,
+        peak=peak,
+        file_size=wav_path.stat().st_size,
+    )
 
 
 def _voice_data_dir() -> Path:
@@ -94,6 +144,23 @@ class PipeWireAudioInput:
         except subprocess.TimeoutExpired:
             proc.terminate()
             proc.wait(timeout=2)
+        stderr_text = ""
+        if proc.stderr is not None:
+            try:
+                stderr_text = proc.stderr.read().decode("utf-8", errors="replace").strip()
+                proc.stderr.close()
+            except OSError:
+                pass
+        allowed_codes = {0, -signal.SIGINT, 130, -signal.SIGTERM, 143}
+        if proc.returncode not in allowed_codes and (not wav.exists() or wav.stat().st_size <= 44):
+            raise RuntimeError(
+                f"Audio capture failed (exit={proc.returncode}): {stderr_text or 'no details'}"
+            )
+        stats = measure_wav_stats(wav)
+        if stats.peak == 0:
+            raise RuntimeError(
+                "Microphone captured digital silence (peak=0). Check PipeWire input or mute state."
+            )
         return wav
 
     def cancel_recording(self) -> None:
@@ -108,6 +175,11 @@ class PipeWireAudioInput:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
+            if proc.stderr is not None:
+                try:
+                    proc.stderr.close()
+                except OSError:
+                    pass
         if wav is not None:
             wav.unlink(missing_ok=True)
 

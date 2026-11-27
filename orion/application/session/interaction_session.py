@@ -59,11 +59,59 @@ class InteractionSession:
         self._wake_word = wake_word
         self._speaker_verifier = speaker_verifier
         self._listeners: list[Callable[[SessionState], None]] = []
+        self._last_error: str = ""
+        if self._state == SessionState.LOCKED:
+            self._start_wake_word_if_available()
 
     @property
     def state(self) -> SessionState:
         with self._lock:
             return self._state
+
+    @property
+    def last_error(self) -> str:
+        with self._lock:
+            return self._last_error
+
+    def wake_word_status(self) -> str:
+        if self._wake_word is None:
+            return "Wake-word listener not configured"
+        if not self._wake_word.is_available():
+            return "Wake-word model or microphone unavailable"
+        if self.state == SessionState.LOCKED:
+            return "Listening for 'Hey ORION'"
+        return "Wake-word paused (session unlocked)"
+
+    def speaker_verification_status(self) -> str:
+        if self._speaker_verifier is None:
+            return "Voice unlock disabled: no speaker verifier configured"
+        if hasattr(self._speaker_verifier, "status"):
+            return str(self._speaker_verifier.status().reason)
+        return (
+            "Owner voiceprint enrolled locally."
+            if self._speaker_verifier.is_enrolled()
+            else "Voice unlock disabled: no enrolled owner voiceprint"
+        )
+
+    def _start_wake_word_if_available(self) -> None:
+        if self._wake_word is not None and self._wake_word.is_available():
+            try:
+                self._wake_word.start()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to start wake-word listener: %s", exc)
+                with self._lock:
+                    self._last_error = str(exc)
+
+    def _stop_wake_word(self) -> None:
+        if self._wake_word is not None:
+            try:
+                self._wake_word.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Error stopping wake-word listener: %s", exc)
+
+    def shutdown(self) -> None:
+        """Stop wake-word listener cleanly on application shutdown."""
+        self._stop_wake_word()
 
     def can_accept_interactive_command(self) -> bool:
         with self._lock:
@@ -84,8 +132,14 @@ class InteractionSession:
 
     def set_enabled(self, enabled: bool) -> SessionState:
         with self._lock:
+            prev = self._state
             self._state = SessionState.LOCKED if enabled else SessionState.DISABLED
             current = self._state
+        logger.info("InteractionSession transition: %s -> %s (reason=set_enabled)", prev, current)
+        if current == SessionState.LOCKED:
+            self._start_wake_word_if_available()
+        else:
+            self._stop_wake_word()
         self._emit(current)
         return current
 
@@ -94,8 +148,11 @@ class InteractionSession:
         with self._lock:
             if self._state == SessionState.DISABLED:
                 return self._state
+            prev = self._state
             self._state = SessionState.UNLOCKED
             current = self._state
+        logger.info("InteractionSession transition: %s -> %s (reason=manual_unlock)", prev, current)
+        self._stop_wake_word()
         self._emit(current)
         return current
 
@@ -104,11 +161,14 @@ class InteractionSession:
         with self._lock:
             if self._state == SessionState.DISABLED:
                 return self._state
+            prev = self._state
             self._state = SessionState.LOCKING
         self._emit(SessionState.LOCKING)
         with self._lock:
             self._state = SessionState.LOCKED
             current = self._state
+        logger.info("InteractionSession transition: %s -> %s (reason=manual_lock)", prev, current)
+        self._start_wake_word_if_available()
         self._emit(current)
         return current
 
@@ -117,8 +177,10 @@ class InteractionSession:
         with self._lock:
             if self._state != SessionState.LOCKED:
                 return self._state
+            prev = self._state
             self._state = SessionState.WAKE_DETECTED
             current = self._state
+        logger.info("InteractionSession transition: %s -> %s (reason=wake_detected)", prev, current)
         self._emit(current)
         return current
 
@@ -136,10 +198,15 @@ class InteractionSession:
                 emit_state = self._state
                 verifier = self._speaker_verifier
 
-        self._emit(emit_state)
         if verifier is None:
+            logger.info(
+                "InteractionSession verification denied -> %s (reason=no_enrolled_voiceprint)",
+                emit_state,
+            )
+            self._emit(emit_state)
             return False
 
+        self._emit(emit_state)
         try:
             ok = bool(verifier.verify_owner(audio_sample))
         except Exception:
@@ -152,5 +219,8 @@ class InteractionSession:
         with self._lock:
             self._state = SessionState.UNLOCKED if ok else SessionState.LOCKED
             final_state = self._state
+        logger.info("InteractionSession verification result -> %s (verified=%s)", final_state, ok)
+        if ok:
+            self._stop_wake_word()
         self._emit(final_state)
         return ok
