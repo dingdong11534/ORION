@@ -20,6 +20,19 @@ from orion.application.contracts import (
 )
 from orion.application.knowledge.contracts import KnowledgeScope, ReadingPolicy
 from orion.application.knowledge.retrieval import KnowledgeService
+from orion.application.productivity.action_policy import ProductivityActionCoordinator
+from orion.application.productivity.contracts import (
+    HabitFrequency,
+    HabitRecord,
+    HabitStatistics,
+    TaskFilter,
+    TaskPriority,
+    TaskRecord,
+    TaskStatus,
+)
+from orion.application.productivity.date_parser import parse_natural_date
+from orion.application.productivity.habit_service import HabitService
+from orion.application.productivity.task_service import TaskService
 from orion.application.tools.contracts import ExecutionStatus
 from orion.application.tools.router import RouterDisposition, ToolRouter
 from orion.application.tools.workspace_browser import WorkspaceBrowserService
@@ -124,6 +137,12 @@ class OrionBridge(QObject):
     workspaceAddedToKnowledge = Signal(str, str, bool)
     responseReferences = Signal(str, list)
 
+    # Personal productivity signals (Milestone 4.11)
+    productivityAvailableChanged = Signal(bool)
+    productivityDataLoaded = Signal(dict)
+    productivityActionResult = Signal(str, dict)
+    productivityError = Signal(str)
+
     def __init__(
         self,
         assistant_service: AssistantService,
@@ -134,6 +153,9 @@ class OrionBridge(QObject):
         tool_router: ToolRouter | None = None,
         workspace_root: Path | None = None,
         knowledge_service: KnowledgeService | None = None,
+        task_service: TaskService | None = None,
+        habit_service: HabitService | None = None,
+        productivity_coordinator: ProductivityActionCoordinator | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
@@ -156,6 +178,11 @@ class OrionBridge(QObject):
             self.set_workspace_tools(tool_router, workspace_root)
 
         self._knowledge_service: KnowledgeService | None = knowledge_service
+        self._task_service: TaskService | None = task_service
+        self._habit_service: HabitService | None = habit_service
+        self._productivity_coordinator: ProductivityActionCoordinator | None = (
+            productivity_coordinator
+        )
         self._knowledge_busy: bool = False
         self._active_knowledge_workers: dict[str, Worker] = {}
         self._knowledge_cancel_token: CancellationToken | None = None
@@ -859,6 +886,7 @@ class OrionBridge(QObject):
         worker.signals.chunk.connect(self._handle_worker_chunk)
         worker.signals.thinking.connect(self._handle_worker_thinking)
         worker.signals.references.connect(self._handle_worker_references)
+        worker.signals.productivity_action.connect(self._handle_worker_productivity_action)
         worker.signals.result.connect(lambda res, tid=task_id: self._handle_worker_result(tid, res))
         worker.signals.error.connect(lambda err, tid=task_id: self._handle_worker_error(tid, err))
         worker.signals.finished.connect(lambda tid=task_id: self._handle_worker_finished(tid))
@@ -1126,6 +1154,9 @@ class OrionBridge(QObject):
                     selected_document_ids=doc_ids,
                     on_references=lambda refs: signals.references.emit(request_id, refs),
                     knowledge_scope=scope,
+                    on_productivity_action=lambda act: signals.productivity_action.emit(
+                        request_id, act
+                    ),
                 ):
                     accumulated.append(chunk)
                     signals.chunk.emit(request_id, chunk)
@@ -1171,6 +1202,18 @@ class OrionBridge(QObject):
         if task_id in self._cancelled_request_ids:
             return
         self.responseReferences.emit(task_id, list(refs) if isinstance(refs, list) else [])
+
+    @Slot(str, object)
+    def _handle_worker_productivity_action(self, task_id: str, action: object) -> None:
+        if self._is_shutting_down:
+            return
+        if task_id not in self._active_workers:
+            return
+        if task_id in self._cancelled_request_ids:
+            return
+        if isinstance(action, dict):
+            self.productivityActionResult.emit(task_id, action)
+            self._emit_productivity_snapshot()
 
     @Slot(str, object)
     def _handle_worker_result(self, task_id: str, result: object) -> None:
@@ -1333,3 +1376,292 @@ class OrionBridge(QObject):
         self._set_workspace_busy(False)
         self._set_knowledge_busy(False)
         return True
+
+    # ------------------------------------------------------------------
+    # Personal Productivity Slots & Properties (Milestone 4.11)
+    # ------------------------------------------------------------------
+
+    @Property(bool, notify=productivityAvailableChanged)
+    def productivityAvailable(self) -> bool:
+        return self._task_service is not None and self._habit_service is not None
+
+    @staticmethod
+    def _task_to_dict(t: TaskRecord) -> dict[str, Any]:
+        due_disp = ""
+        if t.due_at is not None:
+            local_dt = t.due_at.astimezone()
+            due_disp = (
+                local_dt.strftime("%a, %b %-d")
+                if t.due_is_date_only
+                else local_dt.strftime("%a, %b %-d %-I:%M %p")
+            )
+        return {
+            "id": t.id,
+            "title": t.title,
+            "description": t.description or "",
+            "status": t.status.value,
+            "priority": t.priority.value,
+            "due_at": t.due_at.isoformat() if t.due_at else "",
+            "due_display": due_disp,
+            "due_is_date_only": t.due_is_date_only,
+            "created_at": t.created_at.isoformat(),
+            "updated_at": t.updated_at.isoformat(),
+            "completed_at": t.completed_at.isoformat() if t.completed_at else "",
+        }
+
+    @staticmethod
+    def _habit_to_dict(h: HabitRecord, st: HabitStatistics) -> dict[str, Any]:
+        return {
+            "id": h.id,
+            "name": h.name,
+            "description": h.description or "",
+            "frequency": h.frequency.value,
+            "target_count": h.target_count,
+            "completed_today": st.completed_today,
+            "current_streak": st.current_streak,
+            "longest_streak": st.longest_streak,
+            "completion_rate": round(st.completion_rate * 100),
+            "weekly_completed": st.weekly_completed,
+            "weekly_target": st.weekly_target,
+            "monthly_completed": st.monthly_completed,
+            "monthly_target": st.monthly_target,
+            "total_completions": st.total_completions,
+            "recent_dates": [c.completed_date.isoformat() for c in st.recent_completions[:7]],
+        }
+
+    def _emit_productivity_snapshot(
+        self,
+        *,
+        status_filter: str = "",
+        priority_filter: str = "",
+        query: str = "",
+        sort_by: str = "priority_due",
+    ) -> None:
+        if self._task_service is None or self._habit_service is None:
+            return
+        st_enum = TaskStatus(status_filter) if status_filter else None
+        pr_enum = TaskPriority(priority_filter) if priority_filter else None
+        all_tasks = [
+            self._task_to_dict(t)
+            for t in self._task_service.list_tasks(
+                TaskFilter(
+                    status=st_enum,
+                    priority=pr_enum,
+                    query=query or None,
+                    sort_by=sort_by or "priority_due",
+                )
+            )
+        ]
+        today_tasks = [
+            self._task_to_dict(t) for t in self._task_service.list_tasks(TaskFilter(bucket="today"))
+        ]
+        overdue_tasks = [
+            self._task_to_dict(t)
+            for t in self._task_service.list_tasks(TaskFilter(bucket="overdue"))
+        ]
+        upcoming_tasks = [
+            self._task_to_dict(t)
+            for t in self._task_service.list_tasks(TaskFilter(bucket="upcoming"))
+        ]
+        habits = []
+        for h in self._habit_service.list_habits():
+            stats = self._habit_service.get_habit_statistics(h.id)
+            habits.append(self._habit_to_dict(h, stats))
+        self.productivityDataLoaded.emit(
+            {
+                "today_tasks": today_tasks,
+                "overdue_tasks": overdue_tasks,
+                "upcoming_tasks": upcoming_tasks,
+                "all_tasks": all_tasks,
+                "habits": habits,
+            }
+        )
+
+    @Slot(str, str, str, str)
+    def loadProductivityData(
+        self,
+        status_filter: str = "",
+        priority_filter: str = "",
+        query: str = "",
+        sort_by: str = "priority_due",
+    ) -> None:
+        self._emit_productivity_snapshot(
+            status_filter=status_filter,
+            priority_filter=priority_filter,
+            query=query,
+            sort_by=sort_by,
+        )
+
+    @Slot(str, str, str, str)
+    def createTask(
+        self, title: str, description: str = "", priority: str = "medium", due_expression: str = ""
+    ) -> None:
+        if self._task_service is None:
+            return
+        try:
+            due_at = None
+            is_date_only = True
+            if due_expression.strip():
+                parsed = parse_natural_date(due_expression, self._task_service._clock)
+                if parsed.ambiguous or parsed.resolved_at is None:
+                    self.productivityError.emit(parsed.error or "Invalid due date.")
+                    return
+                due_at = parsed.resolved_at
+                is_date_only = parsed.is_date_only
+            self._task_service.create_task(
+                title,
+                description=description or None,
+                priority=TaskPriority(priority.strip().lower() or "medium"),
+                due_at=due_at,
+                due_is_date_only=is_date_only,
+            )
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str, str, str, str, str, str)
+    def updateTask(
+        self,
+        task_id: str,
+        title: str,
+        description: str,
+        priority: str,
+        status: str,
+        due_expression: str = "",
+    ) -> None:
+        if self._task_service is None:
+            return
+        try:
+            kwargs: dict[str, Any] = {
+                "title": title,
+                "description": description,
+                "priority": TaskPriority(priority.strip().lower()),
+                "status": TaskStatus(status.strip().lower()),
+            }
+            if due_expression.strip():
+                parsed = parse_natural_date(due_expression, self._task_service._clock)
+                if parsed.ambiguous or parsed.resolved_at is None:
+                    self.productivityError.emit(parsed.error or "Invalid due date.")
+                    return
+                kwargs["due_at"] = parsed.resolved_at
+                kwargs["due_is_date_only"] = parsed.is_date_only
+            self._task_service.update_task(task_id, **kwargs)
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str)
+    def completeTask(self, task_id: str) -> None:
+        if self._task_service is None:
+            return
+        try:
+            self._task_service.complete_task(task_id)
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str)
+    def reopenTask(self, task_id: str) -> None:
+        if self._task_service is None:
+            return
+        try:
+            self._task_service.reopen_task(task_id)
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str)
+    def cancelTask(self, task_id: str) -> None:
+        if self._task_service is None:
+            return
+        try:
+            self._task_service.cancel_task(task_id)
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str)
+    def archiveTask(self, task_id: str) -> None:
+        if self._task_service is None:
+            return
+        try:
+            self._task_service.archive_task(task_id)
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str, str, str, int)
+    def createHabit(
+        self, name: str, description: str = "", frequency: str = "daily", target_count: int = 1
+    ) -> None:
+        if self._habit_service is None:
+            return
+        try:
+            self._habit_service.create_habit(
+                name,
+                description=description or None,
+                frequency=HabitFrequency(frequency.strip().lower() or "daily"),
+                target_count=max(1, int(target_count)),
+            )
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str, str, str, str, int)
+    def updateHabit(
+        self, habit_id: str, name: str, description: str, frequency: str, target_count: int
+    ) -> None:
+        if self._habit_service is None:
+            return
+        try:
+            self._habit_service.update_habit(
+                habit_id,
+                name=name,
+                description=description,
+                frequency=HabitFrequency(frequency.strip().lower()),
+                target_count=max(1, int(target_count)),
+            )
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str)
+    def completeHabit(self, habit_id: str) -> None:
+        if self._habit_service is None:
+            return
+        try:
+            self._habit_service.complete_habit(habit_id)
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str)
+    def undoHabitCompletion(self, habit_id: str) -> None:
+        if self._habit_service is None:
+            return
+        try:
+            self._habit_service.undo_completion(habit_id)
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str)
+    def archiveHabit(self, habit_id: str) -> None:
+        if self._habit_service is None:
+            return
+        try:
+            self._habit_service.archive_habit(habit_id)
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Slot(str)
+    def undoProductivityAction(self, action_id: str) -> None:
+        if self._productivity_coordinator is None:
+            return
+        try:
+            res = self._productivity_coordinator.undo_action(action_id)
+            self.productivityActionResult.emit("", res.model_dump(mode="json"))
+            self._emit_productivity_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))

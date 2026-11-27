@@ -204,6 +204,10 @@ Rectangle {
                         if (!model.referencesJson) return []
                         try { return JSON.parse(model.referencesJson) } catch (e) { return [] }
                     }
+                    readonly property var prodAction: {
+                        if (!model.productivityActionJson) return null
+                        try { return JSON.parse(model.productivityActionJson) } catch (e) { return null }
+                    }
 
                     ColumnLayout {
                         id: msgCol
@@ -373,6 +377,56 @@ Rectangle {
                                                 horizontalAlignment: Text.AlignHCenter
                                                 verticalAlignment: Text.AlignVCenter
                                                 textFormat: Text.PlainText
+                                            }
+                                        }
+                                    }
+
+                                    // Compact Productivity Action Card (Milestone 4.11)
+                                    Rectangle {
+                                        objectName: "productivityActionCard"
+                                        visible: msgDelegate.prodAction !== null && model.role === "assistant"
+                                        Layout.fillWidth: true
+                                        implicitHeight: prodCardRow.implicitHeight + 12
+                                        radius: theme.radiusSm
+                                        color: theme.bgSurface
+                                        border.width: 1
+                                        border.color: (msgDelegate.prodAction && msgDelegate.prodAction.status === "failed") ? theme.danger : theme.accent
+
+                                        RowLayout {
+                                            id: prodCardRow
+                                            anchors.fill: parent
+                                            anchors.margins: 6
+                                            spacing: 8
+
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: {
+                                                    if (!msgDelegate.prodAction) return ""
+                                                    const a = msgDelegate.prodAction
+                                                    const badge = "[" + String(a.intent || "").toUpperCase() + " · " + String(a.status || "") + "] "
+                                                    return badge + (a.entity_label ? (a.entity_label + " — ") : "") + (a.summary || "")
+                                                }
+                                                font.pixelSize: theme.fontXs
+                                                color: theme.textPrimary
+                                                wrapMode: Text.Wrap
+                                                textFormat: Text.PlainText
+                                            }
+
+                                            Button {
+                                                objectName: "undoProductivityActionButton"
+                                                visible: Boolean(msgDelegate.prodAction && msgDelegate.prodAction.undo_supported && msgDelegate.prodAction.action_id)
+                                                text: "Undo"
+                                                implicitHeight: 24
+                                                implicitWidth: implicitContentWidth + 12
+                                                onClicked: {
+                                                    if (msgDelegate.prodAction && msgDelegate.prodAction.action_id && typeof orion !== "undefined" && orion !== null)
+                                                        orion.undoProductivityAction(msgDelegate.prodAction.action_id)
+                                                }
+                                                background: Rectangle { radius: 6; color: theme.accentLight; border.width: 1; border.color: theme.accent }
+                                                contentItem: Text {
+                                                    text: parent.text; font.pixelSize: 11; font.bold: true; color: theme.accent
+                                                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; textFormat: Text.PlainText
+                                                }
                                             }
                                         }
                                     }

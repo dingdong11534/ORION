@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
@@ -312,4 +313,136 @@ class DocumentChunkModel(Base):
     __table_args__ = (
         UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_doc_idx"),
         Index("idx_document_chunks_document_id", "document_id"),
+    )
+
+
+def generate_task_id() -> str:
+    return f"tsk_{uuid.uuid4().hex}"
+
+
+def generate_habit_id() -> str:
+    return f"hab_{uuid.uuid4().hex}"
+
+
+def generate_habit_completion_id() -> str:
+    return f"hc_{uuid.uuid4().hex}"
+
+
+def generate_productivity_action_id() -> str:
+    return f"pact_{uuid.uuid4().hex}"
+
+
+class TaskModel(Base):
+    """Persisted personal productivity task."""
+
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=generate_task_id)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="todo")
+    priority: Mapped[str] = mapped_column(String(32), nullable=False, default="medium")
+    due_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    due_is_date_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("length(trim(title)) > 0", name="ck_tasks_title_not_blank"),
+        CheckConstraint(
+            "status IN ('todo', 'in_progress', 'done', 'cancelled')",
+            name="ck_tasks_status_valid",
+        ),
+        CheckConstraint(
+            "priority IN ('critical', 'high', 'medium', 'low')",
+            name="ck_tasks_priority_valid",
+        ),
+        Index("idx_tasks_status_archived", "status", "archived_at"),
+        Index("idx_tasks_due_at", "due_at"),
+        Index("idx_tasks_priority", "priority"),
+    )
+
+
+class HabitModel(Base):
+    """Persisted personal habit definition."""
+
+    __tablename__ = "habits"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=generate_habit_id)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    frequency: Mapped[str] = mapped_column(String(32), nullable=False, default="daily")
+    target_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    archived_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+    completions: Mapped[list["HabitCompletionModel"]] = relationship(
+        "HabitCompletionModel",
+        back_populates="habit",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(trim(name)) > 0", name="ck_habits_name_not_blank"),
+        CheckConstraint(
+            "frequency IN ('daily', 'weekly', 'monthly')",
+            name="ck_habits_frequency_valid",
+        ),
+        CheckConstraint("target_count >= 1", name="ck_habits_target_count_pos"),
+        Index("idx_habits_archived", "archived_at"),
+        Index("idx_habits_name", "name"),
+    )
+
+
+class HabitCompletionModel(Base):
+    """Authoritative completion record for a habit on a local calendar date."""
+
+    __tablename__ = "habit_completions"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=generate_habit_completion_id
+    )
+    habit_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("habits.id", ondelete="CASCADE"), nullable=False
+    )
+    completed_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    completed_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    habit: Mapped["HabitModel"] = relationship("HabitModel", back_populates="completions")
+
+    __table_args__ = (
+        UniqueConstraint("habit_id", "completed_date", name="uq_habit_completions_habit_date"),
+        Index("idx_habit_completions_habit_date", "habit_id", "completed_date"),
+    )
+
+
+class ProductivityActionRecordModel(Base):
+    """Idempotency and undo/audit record for natural-language productivity actions."""
+
+    __tablename__ = "productivity_action_records"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=generate_productivity_action_id
+    )
+    client_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    intent: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    entity_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    undo_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("client_request_id", "intent", name="uq_productivity_action_req_intent"),
+        Index("idx_productivity_actions_conv", "conversation_id"),
+        Index("idx_productivity_actions_created", "created_at"),
     )

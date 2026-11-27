@@ -33,7 +33,7 @@ from orion.ui.qt_bridge import OrionBridge
 logger = logging.getLogger(__name__)
 
 # Maintained for backward compatibility with existing tests
-_EXPECTED_ALEMBIC_REVISION = "0006"
+_EXPECTED_ALEMBIC_REVISION = "0007"
 
 
 def activate_window(engine: QQmlApplicationEngine) -> None:
@@ -206,8 +206,17 @@ def main() -> int:
             DocumentRetrievalService,
             KnowledgeService,
         )
+        from orion.application.productivity.action_policy import ProductivityActionCoordinator
+        from orion.application.productivity.habit_service import HabitService
+        from orion.application.productivity.task_service import TaskService
         from orion.infrastructure.knowledge.extractor import LocalDocumentExtractor
         from orion.infrastructure.knowledge.repository import SqliteKnowledgeStore
+        from orion.infrastructure.productivity.repository import (
+            SqliteHabitStore,
+            SqliteProductivityActionStore,
+            SqliteTaskStore,
+            SystemClock,
+        )
 
         knowledge_store = SqliteKnowledgeStore(session_factory)
         retrieval_service = DocumentRetrievalService(knowledge_store)
@@ -217,17 +226,31 @@ def main() -> int:
             event_recorder=conversation_store.record_activity_event,
         )
 
+        clock = SystemClock()
+        task_service = TaskService(SqliteTaskStore(session_factory), clock)
+        habit_service = HabitService(SqliteHabitStore(session_factory), clock)
+        productivity_coordinator = ProductivityActionCoordinator(
+            task_service=task_service,
+            habit_service=habit_service,
+            clock=clock,
+            action_store=SqliteProductivityActionStore(session_factory),
+        )
+
         assistant_service = AssistantService(
             model_provider=model_provider,
             conversation_store=conversation_store,
             settings_store=settings_store,
             retrieval_service=retrieval_service,
+            productivity_coordinator=productivity_coordinator,
         )
 
         # 8. Construct OrionBridge & coordinate graceful lifecycle
         bridge = OrionBridge(
             assistant_service=assistant_service,
             knowledge_service=knowledge_service,
+            task_service=task_service,
+            habit_service=habit_service,
+            productivity_coordinator=productivity_coordinator,
         )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,

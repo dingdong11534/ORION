@@ -30,9 +30,16 @@ ApplicationWindow {
     readonly property bool knowledgeAvailable: (typeof orion !== "undefined" && orion !== null) ? orion.knowledgeAvailable : false
     readonly property bool knowledgeBusy: (typeof orion !== "undefined" && orion !== null) ? orion.knowledgeBusy : false
     readonly property string knowledgeMode: (typeof orion !== "undefined" && orion !== null) ? orion.knowledgeMode : "chat"
+    readonly property bool productivityAvailable: (typeof orion !== "undefined" && orion !== null) ? orion.productivityAvailable : false
     readonly property int maxThinkingChars: 32768
 
-    property string activePage: "chat"  // "chat" | "knowledge" | "workspace"
+    property string activePage: "chat"  // "chat" | "knowledge" | "workspace" | "productivity"
+    property var prodTodayTasks: []
+    property var prodOverdueTasks: []
+    property var prodUpcomingTasks: []
+    property var prodAllTasks: []
+    property var prodHabits: []
+    property string productivityError: ""
     property bool workspacePanelOpen: false
     onWorkspacePanelOpenChanged: { if (workspacePanelOpen && activePage !== "workspace") activePage = "workspace" }
     property string activeConversationId: (typeof orion !== "undefined" && orion !== null) ? orion.activeConversationId : ""
@@ -136,6 +143,13 @@ ApplicationWindow {
         }
     }
 
+    function openProductivityPage() {
+        root.activePage = "productivity"
+        if (root.productivityAvailable && typeof orion !== "undefined" && orion !== null) {
+            orion.loadProductivityData("", "", "", "priority_due")
+        }
+    }
+
     function openReferenceModal(refObj) {
         root.inspectedReference = refObj
         root.inspectedPassageContext = ""
@@ -211,7 +225,8 @@ ApplicationWindow {
             thinkingTruncated: false,
             isRagGrounded: false,
             referencesJson: "[]",
-            referencesExpanded: false
+            referencesExpanded: false,
+            productivityActionJson: ""
         })
 
         chatModel.append({
@@ -228,7 +243,8 @@ ApplicationWindow {
             thinkingTruncated: false,
             isRagGrounded: false,
             referencesJson: "[]",
-            referencesExpanded: false
+            referencesExpanded: false,
+            productivityActionJson: ""
         })
 
         chatPage.composerField.text = ""
@@ -536,6 +552,31 @@ ApplicationWindow {
             root.knowledgeError = errMsg || "Knowledge Base error."
         }
 
+        function onProductivityDataLoaded(payload) {
+            if (!payload) return
+            root.prodTodayTasks = payload.today_tasks || []
+            root.prodOverdueTasks = payload.overdue_tasks || []
+            root.prodUpcomingTasks = payload.upcoming_tasks || []
+            root.prodAllTasks = payload.all_tasks || []
+            root.prodHabits = payload.habits || []
+        }
+
+        function onProductivityError(errMsg) {
+            root.productivityError = errMsg || "Productivity operation failed."
+        }
+
+        function onProductivityActionResult(requestId, actionObj) {
+            if (!actionObj) return
+            const jsonStr = JSON.stringify(actionObj)
+            for (let i = chatModel.count - 1; i >= 0; i--) {
+                const item = chatModel.get(i)
+                if (item.role === "assistant" && (!requestId || !item.requestId || item.requestId === requestId)) {
+                    chatModel.setProperty(i, "productivityActionJson", jsonStr)
+                    break
+                }
+            }
+        }
+
         function onKnowledgeProgress(info) {
             if (!info) return
             if (info.stage === "indexing") {
@@ -687,6 +728,25 @@ ApplicationWindow {
                             verticalAlignment: Text.AlignVCenter; leftPadding: 10
                         }
                     }
+
+                    Button {
+                        id: productivityToggleButton
+                        objectName: "productivityToggleButton"
+                        visible: root.productivityAvailable
+                        Layout.fillWidth: true
+                        text: "Productivity"
+                        implicitHeight: 34
+                        onClicked: root.openProductivityPage()
+                        background: Rectangle {
+                            radius: theme.radiusSm
+                            color: root.activePage === "productivity" ? theme.accent : "transparent"
+                        }
+                        contentItem: Text {
+                            text: parent.text; font.pixelSize: theme.fontSm; font.bold: true
+                            color: root.activePage === "productivity" ? theme.bgSurface : theme.textPrimary
+                            verticalAlignment: Text.AlignVCenter; leftPadding: 10
+                        }
+                    }
                 }
 
                 Rectangle { Layout.fillWidth: true; height: 1; color: theme.borderStrong }
@@ -804,7 +864,7 @@ ApplicationWindow {
         StackLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: root.activePage === "knowledge" ? 1 : (root.activePage === "workspace" ? 2 : 0)
+            currentIndex: root.activePage === "knowledge" ? 1 : (root.activePage === "workspace" ? 2 : (root.activePage === "productivity" ? 3 : 0))
 
             ChatPage {
                 id: chatPage
@@ -825,6 +885,12 @@ ApplicationWindow {
                 root: root
                 theme: theme
                 workspaceEntriesModel: workspaceEntriesModel
+            }
+
+            ProductivityPage {
+                id: productivityPage
+                root: root
+                theme: theme
             }
         }
     }

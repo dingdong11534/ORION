@@ -56,11 +56,13 @@ class AssistantService:
         max_history_messages: int | None = None,
         max_history_chars: int = 2400,
         retrieval_service: DocumentRetrievalService | None = None,
+        productivity_coordinator: Any = None,
     ) -> None:
         self._model_provider = model_provider
         self._conversation_store = conversation_store
         self._settings_store = settings_store
         self._retrieval_service = retrieval_service
+        self._productivity_coordinator = productivity_coordinator
         self._query_resolver = KnowledgeQueryContextResolver()
         if max_history_messages is None:
             env_limit = os.environ.get("ORION_MAX_HISTORY_MESSAGES", "12").strip()
@@ -607,6 +609,7 @@ class AssistantService:
         selected_document_ids: Sequence[str] | None = None,
         on_references: Callable[[list[dict[str, Any]]], None] | None = None,
         knowledge_scope: KnowledgeScope | None = None,
+        on_productivity_action: Callable[[dict[str, Any]], None] | None = None,
     ) -> Iterator[str]:
         """Process incoming user message incrementally, yielding chunks and persisting once complete."""
         # A. Receive request & validate
@@ -676,6 +679,27 @@ class AssistantService:
         try:
             # Snapshot thinking preference at request start so mid-request toggles never alter it
             snapshot_think = self.get_show_thinking() and self.supports_thinking()
+
+            # C2. Constrained natural-language productivity action check (only on user message)
+            if self._productivity_coordinator is not None:
+                prod_res = self._productivity_coordinator.handle_message(
+                    req.content,
+                    conversation_id=cid,
+                    client_request_id=req.client_request_id,
+                )
+                if prod_res is not None:
+                    if on_productivity_action is not None:
+                        on_productivity_action(prod_res.model_dump(mode="json"))
+                    accumulated_chunks.append(prod_res.summary)
+                    if on_chunk is not None:
+                        on_chunk(prod_res.summary)
+                    yield prod_res.summary
+                    self._conversation_store.complete_request(
+                        conversation_id=cid,
+                        client_request_id=req.client_request_id,
+                        response_content=prod_res.summary,
+                    )
+                    return
 
             # D. Optional local RAG retrieval governed by explicit KnowledgeScope + Conversation Context
             model_prompt = req.content
