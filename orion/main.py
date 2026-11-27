@@ -256,11 +256,19 @@ def main() -> int:
         from orion.application.identity.capabilities import CapabilityRegistry
         from orion.application.identity.identity_service import OrionIdentityService
         from orion.application.memory.memory_service import PersonalMemoryService
+        from orion.application.productivity.daily_briefing import DailyBriefingService
         from orion.application.web.web_search_service import PublicWebSearchService
         from orion.infrastructure.memory.repository import SqlitePersonalMemoryStore
 
         memory_service = PersonalMemoryService(SqlitePersonalMemoryStore(session_factory))
         web_search_service = PublicWebSearchService()
+        briefing_service = DailyBriefingService(
+            task_service=task_service,
+            habit_service=habit_service,
+            clock=clock,
+            session_factory=session_factory,
+            memory_service=memory_service,
+        )
 
         capability_registry = CapabilityRegistry(
             model_provider=model_provider,
@@ -283,6 +291,7 @@ def main() -> int:
             identity_service=identity_service,
             memory_service=memory_service,
             web_search_service=web_search_service,
+            briefing_service=briefing_service,
         )
 
         # 8. Construct OrionBridge & coordinate graceful lifecycle

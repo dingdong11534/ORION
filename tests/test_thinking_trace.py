@@ -275,6 +275,9 @@ def _run_qml_thinking_ui_check(tmp_path: Path) -> None:
         app.processEvents()
         time.sleep(0.01)
 
+    root.setProperty("activePage", "chat")
+    app.processEvents()
+
     toggle = root.findChild(QObject, "showThinkingToggle")
     assert toggle is not None
     assert toggle.property("visible") is True

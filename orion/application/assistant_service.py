@@ -61,6 +61,7 @@ class AssistantService:
         identity_service: Any = None,
         memory_service: Any = None,
         web_search_service: Any = None,
+        briefing_service: Any = None,
     ) -> None:
         self._model_provider = model_provider
         self._conversation_store = conversation_store
@@ -70,6 +71,7 @@ class AssistantService:
         self._identity_service = identity_service
         self._memory_service = memory_service
         self._web_search_service = web_search_service
+        self._briefing_service = briefing_service
         self._query_resolver = KnowledgeQueryContextResolver()
         if max_history_messages is None:
             env_limit = os.environ.get("ORION_MAX_HISTORY_MESSAGES", "12").strip()
@@ -757,6 +759,22 @@ class AssistantService:
                         response_content=mem_reply,
                     )
                     return
+
+            # C4. Grounded Daily Briefing queries
+            if self._briefing_service is not None and (
+                self._briefing_service.is_briefing_query(req.content)
+            ):
+                b_reply = self._briefing_service.answer(req.content)
+                accumulated_chunks.append(b_reply)
+                if on_chunk is not None:
+                    on_chunk(b_reply)
+                yield b_reply
+                self._conversation_store.complete_request(
+                    conversation_id=cid,
+                    client_request_id=req.client_request_id,
+                    response_content=b_reply,
+                )
+                return
 
             # D. Optional local RAG retrieval governed by explicit KnowledgeScope + Conversation Context
             model_prompt = req.content
