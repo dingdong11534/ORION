@@ -209,8 +209,9 @@ def test_qml_persistent_mic_visibility_navigation_and_locked_session(tmp_path: P
     qml.rootContext().setContextProperty("orion", bridge)
     qml.load(QUrl.fromLocalFile(str(Path("orion/ui/qml/Main.qml").resolve())))
     root = qml.rootObjects()[0]
-    QTest.qWait(60)
+    bridge._thread_pool.waitForDone(3000)
     app.processEvents()
+    QTest.qWait(40)
 
     # Persistent mic bar in Main window
     mic_bar = root.findChild(QQuickItem, "persistentMicBar")
@@ -241,7 +242,9 @@ def test_qml_persistent_mic_visibility_navigation_and_locked_session(tmp_path: P
     assert not root.isVisible()
     assert orb.isVisible()
 
+    root.close()
     bridge.shutdown()
+    app.processEvents()
     del qml
     del bridge
     engine.dispose()
