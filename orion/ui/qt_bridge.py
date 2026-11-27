@@ -186,6 +186,10 @@ class OrionBridge(QObject):
     sessionStateChanged = Signal(str)
     backgroundModeChanged = Signal(bool)
     backgroundJobsLoaded = Signal(list)
+    wakeWordDetected = Signal()
+    wakeWordDiagnosticsChanged = Signal()
+    conversationSidebarWidthChanged = Signal(int)
+    navSidebarWidthChanged = Signal(int)
 
     def __init__(
         self,
@@ -242,11 +246,21 @@ class OrionBridge(QObject):
             )
         self._voice_state: str = "idle"
         self._theme_mode: str = "light"
+        self._conversation_sidebar_width: int = 268
+        self._nav_sidebar_width: int = 208
         if getattr(self._service, "_settings_store", None) is not None:
             try:
                 saved_theme = self._service._settings_store.get_setting("ui_theme_mode")
                 if saved_theme in ("light", "dark", "system"):
                     self._theme_mode = saved_theme
+                saved_cw = self._service._settings_store.get_setting(
+                    "ui_conversation_sidebar_width"
+                )
+                if saved_cw and saved_cw.isdigit():
+                    self._conversation_sidebar_width = max(220, min(420, int(saved_cw)))
+                saved_nw = self._service._settings_store.get_setting("ui_nav_sidebar_width")
+                if saved_nw and saved_nw.isdigit():
+                    self._nav_sidebar_width = max(160, min(280, int(saved_nw)))
                 if self._voice_service is not None:
                     v_en = self._service._settings_store.get_setting("voice_enabled")
                     v_as = self._service._settings_store.get_setting("voice_auto_speak")
@@ -2149,6 +2163,78 @@ class OrionBridge(QObject):
     @Property(bool, notify=backgroundModeChanged)
     def backgroundMode(self) -> bool:
         return self._background_mode
+
+    @Property(int, notify=conversationSidebarWidthChanged)
+    def conversationSidebarWidth(self) -> int:
+        return self._conversation_sidebar_width
+
+    @Property(int, notify=navSidebarWidthChanged)
+    def navSidebarWidth(self) -> int:
+        return self._nav_sidebar_width
+
+    @Property("QVariantMap", notify=wakeWordDiagnosticsChanged)
+    def wakeWordDiagnostics(self) -> dict[str, Any]:
+        ww = getattr(self._interaction_session, "_wake_word", None)
+        if ww is not None and hasattr(ww, "get_diagnostics"):
+            return dict(ww.get_diagnostics())
+        return {
+            "input_source": "none",
+            "capture_status": "unavailable",
+            "sample_rate": 16000,
+            "channels": 1,
+            "current_rms": 0.0,
+            "model_status": "missing",
+            "model_path": "",
+            "thread_alive": False,
+            "last_wake_at": "",
+            "last_error": "Wake-word listener not configured",
+        }
+
+    def notify_wake_word_detected(self) -> None:
+        """Thread-safe hook called when 'Hey ORION' is recognized."""
+        self.wakeWordDetected.emit()
+        self.wakeWordDiagnosticsChanged.emit()
+
+    @Slot()
+    def refreshWakeWordDiagnostics(self) -> None:
+        self.wakeWordDiagnosticsChanged.emit()
+
+    @Slot()
+    def testWakeWordMicrophone(self) -> None:
+        ww = getattr(self._interaction_session, "_wake_word", None)
+        if ww is None or not hasattr(ww, "test_microphone_rms"):
+            return
+        try:
+            ww.test_microphone_rms(0.4)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Microphone test failed: %s", exc)
+        self.wakeWordDiagnosticsChanged.emit()
+
+    @Slot(int)
+    def setConversationSidebarWidth(self, width: int) -> None:
+        clamped = max(220, min(420, int(width)))
+        if self._conversation_sidebar_width != clamped:
+            self._conversation_sidebar_width = clamped
+            self.conversationSidebarWidthChanged.emit(clamped)
+        if getattr(self._service, "_settings_store", None) is not None:
+            try:
+                self._service._settings_store.set_setting(
+                    "ui_conversation_sidebar_width", str(clamped)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist conversation sidebar width: %s", exc)
+
+    @Slot(int)
+    def setNavSidebarWidth(self, width: int) -> None:
+        clamped = max(160, min(280, int(width)))
+        if self._nav_sidebar_width != clamped:
+            self._nav_sidebar_width = clamped
+            self.navSidebarWidthChanged.emit(clamped)
+        if getattr(self._service, "_settings_store", None) is not None:
+            try:
+                self._service._settings_store.set_setting("ui_nav_sidebar_width", str(clamped))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist nav sidebar width: %s", exc)
 
     @Slot()
     def lockSession(self) -> None:

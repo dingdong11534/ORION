@@ -4,12 +4,15 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import struct
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,19 +25,26 @@ def _voice_data_dir() -> Path:
     return (root / "orion" / "voice").resolve()
 
 
+def _normalize_phrase_text(text: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9\s]+", " ", (text or "").lower())
+    return " ".join(cleaned.split())
+
+
 class VoskWakeWordListener:
-    """Lightweight streaming 'Hey ORION' detector using PipeWire + Vosk grammar."""
+    """Lightweight streaming 'Hey ORION' detector using PipeWire (pw-cat) + Vosk grammar."""
 
     def __init__(
         self,
         *,
         model_dir: Path | None = None,
         phrase: str = "hey orion",
+        cooldown_seconds: float = 3.0,
         on_detected: Callable[[], None] | None = None,
         on_error: Callable[[str], None] | None = None,
     ) -> None:
         self._model_dir = model_dir or (_voice_data_dir() / "vosk" / "vosk-model-small-en-us-0.15")
-        self._phrase = phrase.lower().strip()
+        self._phrase = _normalize_phrase_text(phrase)
+        self._cooldown_seconds = max(0.5, float(cooldown_seconds))
         self._on_detected = on_detected
         self._on_error = on_error
         self._lock = threading.Lock()
@@ -43,6 +53,12 @@ class VoskWakeWordListener:
         self._proc: subprocess.Popen[bytes] | None = None
         self._model: Any = None
         self._running = False
+        self._paused_for_ptt = False
+        self._last_trigger_monotonic = 0.0
+        self._last_wake_at = ""
+        self._current_rms = 0.0
+        self._last_error = ""
+        self._capture_status = "stopped"
 
     def set_callbacks(
         self,
@@ -56,25 +72,67 @@ class VoskWakeWordListener:
             if on_error is not None:
                 self._on_error = on_error
 
+    def _capture_backend(self) -> str:
+        if shutil.which("pw-cat"):
+            return "pipewire (pw-cat)"
+        if shutil.which("arecord"):
+            return "alsa (arecord)"
+        return "none"
+
     def is_available(self) -> bool:
         try:
             import vosk  # noqa: F401
         except ImportError:
             return False
-        has_rec = bool(shutil.which("pw-record") or shutil.which("arecord"))
-        return has_rec and self._model_dir.is_dir()
+        return self._capture_backend() != "none" and self._model_dir.is_dir()
 
     @property
     def is_running(self) -> bool:
         with self._lock:
             return self._running
 
+    def get_diagnostics(self) -> dict[str, Any]:
+        with self._lock:
+            thread_alive = bool(self._thread is not None and self._thread.is_alive())
+            if self._paused_for_ptt:
+                status = "paused_for_ptt"
+            elif self._last_error:
+                status = "error"
+            elif self._running and thread_alive:
+                status = "listening"
+            elif not self.is_available():
+                status = "unavailable"
+            else:
+                status = self._capture_status
+            model_status = (
+                "loaded"
+                if self._model is not None
+                else ("available" if self._model_dir.is_dir() else "missing")
+            )
+            return {
+                "input_source": self._capture_backend(),
+                "capture_status": status,
+                "sample_rate": 16000,
+                "channels": 1,
+                "current_rms": round(self._current_rms, 1),
+                "model_status": model_status,
+                "model_path": str(self._model_dir),
+                "thread_alive": thread_alive,
+                "last_wake_at": self._last_wake_at,
+                "last_error": self._last_error,
+            }
+
     def start(self) -> None:
         with self._lock:
             if self._running:
                 return
             if not self.is_available():
-                raise RuntimeError(f"Wake-word model or capture tool missing at {self._model_dir}")
+                self._capture_status = "unavailable"
+                self._last_error = f"Wake-word model or capture tool missing at {self._model_dir}"
+                raise RuntimeError(self._last_error)
+            self._paused_for_ptt = False
+            self._last_error = ""
+            self._capture_status = "starting"
             self._stop_event.clear()
             self._running = True
             self._thread = threading.Thread(
@@ -88,6 +146,7 @@ class VoskWakeWordListener:
             proc = self._proc
             thread = self._thread
             self._running = False
+            self._capture_status = "stopped"
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -100,10 +159,25 @@ class VoskWakeWordListener:
             self._proc = None
             self._thread = None
 
+    def pause_for_ptt(self) -> None:
+        """Release microphone cleanly while push-to-talk is recording."""
+        with self._lock:
+            self._paused_for_ptt = True
+        self.stop()
+
+    def resume_after_ptt(self) -> None:
+        """Resume wake-word listening after push-to-talk finishes."""
+        with self._lock:
+            self._paused_for_ptt = False
+        if self.is_available():
+            self.start()
+
     def _build_capture_cmd(self) -> list[str]:
-        if shutil.which("pw-record"):
+        if shutil.which("pw-cat"):
             return [
-                "pw-record",
+                "pw-cat",
+                "--record",
+                "--raw",
                 "--rate",
                 "16000",
                 "--channels",
@@ -126,8 +200,68 @@ class VoskWakeWordListener:
         return vosk.KaldiRecognizer(self._model, 16000, grammar)
 
     def matches_phrase(self, text: str) -> bool:
-        normalized = " ".join((text or "").lower().split())
-        return self._phrase in normalized
+        normalized = _normalize_phrase_text(text)
+        return bool(self._phrase) and self._phrase in normalized
+
+    def _measure_pcm_rms(self, data: bytes) -> float:
+        count = len(data) // 2
+        if count == 0:
+            return 0.0
+        samples = struct.unpack(f"<{count}h", data[: count * 2])
+        return math.sqrt(sum(s * s for s in samples) / count)
+
+    def _maybe_trigger_wake(self, rec: Any) -> bool:
+        now = time.monotonic()
+        if (now - self._last_trigger_monotonic) < self._cooldown_seconds:
+            return False
+        self._last_trigger_monotonic = now
+        self._last_wake_at = datetime.now(UTC).isoformat()
+        rec.Reset()
+        cb = self._on_detected
+        if cb is not None:
+            cb()
+        return True
+
+    def process_audio_chunk(self, rec: Any, data: bytes) -> bool:
+        """Feed one raw 16kHz s16le PCM chunk into Vosk and trigger if phrase matches."""
+        rms = self._measure_pcm_rms(data)
+        with self._lock:
+            self._current_rms = rms
+
+        matched = False
+        if rec.AcceptWaveform(data):
+            res = json.loads(rec.Result() or "{}")
+            matched = self.matches_phrase(res.get("text", ""))
+        else:
+            part = json.loads(rec.PartialResult() or "{}")
+            matched = self.matches_phrase(part.get("partial", ""))
+
+        if matched:
+            return self._maybe_trigger_wake(rec)
+        return False
+
+    def test_microphone_rms(self, duration_seconds: float = 0.5) -> float:
+        """Capture a short raw PCM sample to verify microphone input and return RMS."""
+        was_running = self.is_running
+        if was_running:
+            return self.get_diagnostics()["current_rms"]
+        cmd = self._build_capture_cmd()
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            target_bytes = int(16000 * 2 * max(0.1, duration_seconds))
+            assert proc.stdout is not None
+            data = proc.stdout.read(target_bytes)
+            rms = self._measure_pcm_rms(data)
+            with self._lock:
+                self._current_rms = rms
+            return rms
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
     def _run_loop(self) -> None:
         try:
@@ -140,6 +274,7 @@ class VoskWakeWordListener:
             )
             with self._lock:
                 self._proc = proc
+                self._capture_status = "listening"
 
             assert proc.stdout is not None
             chunk_bytes = 4000  # ~125 ms at 16kHz s16le mono
@@ -147,28 +282,23 @@ class VoskWakeWordListener:
                 data = proc.stdout.read(chunk_bytes)
                 if not data:
                     break
-                detected = False
-                if rec.AcceptWaveform(data):
-                    res = json.loads(rec.Result() or "{}")
-                    detected = self.matches_phrase(res.get("text", ""))
-                else:
-                    part = json.loads(rec.PartialResult() or "{}")
-                    detected = self.matches_phrase(part.get("partial", ""))
-
-                if detected:
-                    rec.Reset()
-                    cb = self._on_detected
-                    if cb is not None:
-                        cb()
+                self.process_audio_chunk(rec, data)
 
             if not self._stop_event.is_set() and proc.poll() not in (0, None):
                 err = ""
                 if proc.stderr is not None:
                     err = proc.stderr.read().decode("utf-8", errors="replace").strip()
+                msg = err or f"Wake-word capture exited with code {proc.returncode}"
+                with self._lock:
+                    self._last_error = msg
+                    self._capture_status = "error"
                 if self._on_error is not None:
-                    self._on_error(err or f"Wake-word capture exited with code {proc.returncode}")
+                    self._on_error(msg)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Wake-word listener error: %s", exc)
+            with self._lock:
+                self._last_error = str(exc)
+                self._capture_status = "error"
             if self._on_error is not None:
                 self._on_error(str(exc))
         finally:
@@ -176,6 +306,8 @@ class VoskWakeWordListener:
                 proc = self._proc
                 self._proc = None
                 self._running = False
+                if self._capture_status == "listening":
+                    self._capture_status = "stopped"
             if proc is not None and proc.poll() is None:
                 proc.terminate()
                 try:
@@ -257,7 +389,6 @@ class LocalSpeakerVerifier:
         rms = math.sqrt(sum(s * s for s in samples) / count)
         if rms < 50.0:
             return None
-        # 8-band zero-crossing & energy distribution feature vector
         bands = [0.0] * 8
         step = max(1, count // 8)
         for idx in range(8):

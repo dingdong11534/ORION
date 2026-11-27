@@ -65,6 +65,8 @@ ApplicationWindow {
     property var backgroundJobs: []
     property bool orbHidden: false
     property bool orbExpanded: false
+    property bool orbForceVisible: false
+    property bool orbWakeFlash: false
     property string productivityError: ""
     property string voiceErrorMessage: ""
     property string pendingDeleteId: ""
@@ -180,6 +182,29 @@ ApplicationWindow {
     function focusComposer() { chatPage.composerField.forceActiveFocus() }
     function insertTranscriptIntoComposer(text) { chatPage.insertTranscript(text) }
     function openKnowledgePage() { root.activePage = "knowledge" }
+    function activateOrbFromWakeWord() {
+        root.orbHidden = false
+        root.orbForceVisible = true
+        root.orbExpanded = true
+        root.orbWakeFlash = true
+        wakeResetTimer.restart()
+        if (typeof orion !== "undefined" && orion !== null)
+            orion.loadBackgroundJobs()
+        if (orionOrbWindow.x < 0 || orionOrbWindow.x > Screen.desktopAvailableWidth - orionOrbWindow.width)
+            orionOrbWindow.x = Math.max(16, Screen.desktopAvailableWidth - orionOrbWindow.width - 24)
+        if (orionOrbWindow.y < 0 || orionOrbWindow.y > Screen.desktopAvailableHeight - orionOrbWindow.height)
+            orionOrbWindow.y = Math.max(16, Screen.desktopAvailableHeight - orionOrbWindow.height - 24)
+        orionOrbWindow.show()
+        orionOrbWindow.raise()
+        orionOrbWindow.requestActivate()
+    }
+
+    Timer {
+        id: wakeResetTimer
+        interval: 3500
+        repeat: false
+        onTriggered: root.orbWakeFlash = false
+    }
     function startAskKnowledge(promptText, docIds) {
         const ids = docIds ? docIds.slice() : []
         root.selectedKnowledgeIds = ids
@@ -226,14 +251,43 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
-        // Left Navigation (208px wide, collapses to 56px icon rail below 1000px)
+        // Left Navigation (resizable on normal windows, collapses to 56px icon rail below 1000px)
         Rectangle {
+            id: navSidebar
             readonly property bool compactRail: root.width < 1000
-            Layout.preferredWidth: compactRail ? 56 : 208
+            property int customNavWidth: (typeof orion !== "undefined" && orion !== null) ? orion.navSidebarWidth : 208
+            Layout.preferredWidth: compactRail ? 56 : Math.max(160, Math.min(280, customNavWidth))
             Layout.fillHeight: true
             color: Theme.sidebar
             border.width: 1
             border.color: Theme.hairline
+
+            MouseArea {
+                visible: !navSidebar.compactRail
+                width: 6
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
+                cursorShape: Qt.SplitHCursor
+                z: 10
+                property real startX: 0
+                property int startWidth: 208
+                onPressed: function(mouse) {
+                    startX = mapToGlobal(mouse.x, mouse.y).x
+                    startWidth = navSidebar.Layout.preferredWidth
+                }
+                onPositionChanged: function(mouse) {
+                    if (pressed) {
+                        const dx = mapToGlobal(mouse.x, mouse.y).x - startX
+                        const nextW = Math.max(160, Math.min(280, Math.round(startWidth + dx)))
+                        navSidebar.customNavWidth = nextW
+                    }
+                }
+                onReleased: {
+                    if (typeof orion !== "undefined" && orion !== null)
+                        orion.setNavSidebarWidth(navSidebar.customNavWidth)
+                }
+            }
 
             ColumnLayout {
                 anchors.fill: parent
@@ -437,10 +491,10 @@ ApplicationWindow {
         id: orionOrbWindow
         objectName: "orionOrbWindow"
         transientParent: null
-        visible: root.backgroundMode && !root.orbHidden
+        visible: (root.backgroundMode || root.orbForceVisible) && !root.orbHidden
         width: root.orbExpanded ? 300 : 72
-        height: root.orbExpanded ? 270 : 72
-        flags: Qt.FramelessWindowHint | Qt.Window
+        height: root.orbExpanded ? 280 : 72
+        flags: Qt.FramelessWindowHint | Qt.Window | Qt.WindowStaysOnTopHint
         color: "transparent"
         title: "ORION Orb"
         Component.onCompleted: {
@@ -551,11 +605,11 @@ ApplicationWindow {
                             }
                             Text {
                                 objectName: "orbStatusText"
-                                text: "ORION · " + root.sessionState.toUpperCase()
+                                text: root.orbWakeFlash ? ("WAKE · " + root.sessionState.toUpperCase()) : ("ORION · " + root.sessionState.toUpperCase())
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.fontSecondary
                                 font.weight: Font.DemiBold
-                                color: Theme.text
+                                color: root.orbWakeFlash ? Theme.accent : Theme.text
                                 textFormat: Text.PlainText
                             }
                         }
@@ -565,7 +619,10 @@ ApplicationWindow {
                         text: "—"
                         variant: "quiet"
                         compact: true
-                        onClicked: root.orbExpanded = false
+                        onClicked: {
+                            root.orbExpanded = false
+                            root.orbForceVisible = false
+                        }
                     }
                     OrionButton {
                         objectName: "orbHideButton"
@@ -574,6 +631,7 @@ ApplicationWindow {
                         compact: true
                         onClicked: {
                             root.orbExpanded = false
+                            root.orbForceVisible = false
                             root.orbHidden = true
                         }
                     }
@@ -641,6 +699,8 @@ ApplicationWindow {
                     text: "Open ORION"
                     onClicked: {
                         root.orbExpanded = false
+                        root.orbForceVisible = false
+                        root.orbHidden = false
                         if (typeof orion !== "undefined" && orion !== null)
                             orion.setBackgroundMode(false)
                     }

@@ -289,6 +289,10 @@ Item {
             root.backgroundJobs = jobs || []
         }
 
+        function onWakeWordDetected() {
+            root.activateOrbFromWakeWord()
+        }
+
         function onApprovalRequested(requestDict) {
             pendingApprovalsModel.append(requestDict)
             root.approvalRemainingSeconds = 60

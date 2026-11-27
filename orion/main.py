@@ -239,11 +239,30 @@ def main() -> int:
         )
 
         # 7b. Construct offline voice service (lazy model loading + idle unload)
+        from orion.application.session.interaction_session import InteractionSession, SessionState
         from orion.application.voice.heavy_work_gate import HeavyWorkGate
         from orion.application.voice.voice_service import VoiceService
         from orion.infrastructure.voice.audio_io import PipeWireAudioInput, PipeWireAudioOutput
         from orion.infrastructure.voice.piper_tts import PiperTtsAdapter
+        from orion.infrastructure.voice.wake_word import (
+            LocalSpeakerVerifier,
+            VoskWakeWordListener,
+        )
         from orion.infrastructure.voice.whispercpp_stt import WhisperCppSttAdapter
+
+        speaker_verifier = LocalSpeakerVerifier()
+        wake_word_listener = VoskWakeWordListener(phrase="hey orion")
+        interaction_session = InteractionSession(
+            enabled=True,
+            wake_word=wake_word_listener,
+            speaker_verifier=speaker_verifier,
+        )
+
+        def _on_ptt_active(active: bool) -> None:
+            if active:
+                wake_word_listener.pause_for_ptt()
+            elif interaction_session.state == SessionState.LOCKED:
+                wake_word_listener.resume_after_ptt()
 
         voice_service = VoiceService(
             stt=WhisperCppSttAdapter(),
@@ -251,6 +270,7 @@ def main() -> int:
             audio_in=PipeWireAudioInput(),
             audio_out=PipeWireAudioOutput(),
             gate=HeavyWorkGate(),
+            on_ptt_active_changed=_on_ptt_active,
         )
 
         from orion.application.identity.capabilities import CapabilityRegistry
@@ -296,34 +316,12 @@ def main() -> int:
 
         from orion.application.jobs.supervisor import BackgroundJobSupervisor
         from orion.application.launcher.app_registry import ApplicationRegistryService
-        from orion.application.session.interaction_session import InteractionSession
         from orion.infrastructure.browser.playwright_browser_service import PlaywrightBrowserService
         from orion.infrastructure.downloads.inbox_service import OrionInboxService
         from orion.infrastructure.jobs.repository import SqliteBackgroundJobStore
-        from orion.infrastructure.voice.wake_word import (
-            LocalSpeakerVerifier,
-            VoskWakeWordListener,
-        )
 
         job_store = SqliteBackgroundJobStore(session_factory)
         job_supervisor = BackgroundJobSupervisor(job_store)
-        speaker_verifier = LocalSpeakerVerifier()
-        wake_word_listener = VoskWakeWordListener(phrase="hey orion")
-        interaction_session = InteractionSession(
-            enabled=True,
-            wake_word=wake_word_listener,
-            speaker_verifier=speaker_verifier,
-        )
-
-        def _on_wake_phrase() -> None:
-            interaction_session.on_wake_detected()
-            # Never unlocks on wake-word alone; requires enrolled owner verification.
-            interaction_session.verify_and_unlock(b"")
-
-        wake_word_listener.set_callbacks(
-            on_detected=_on_wake_phrase,
-            on_error=lambda err: logger.warning("Wake-word listener error: %s", err),
-        )
         browser_service = PlaywrightBrowserService()
         app_registry = ApplicationRegistryService(session_factory, audit_store=job_store)
         app_registry.detect_default_apps()
@@ -342,6 +340,20 @@ def main() -> int:
             interaction_session=interaction_session,
             job_store=job_store,
             job_supervisor=job_supervisor,
+        )
+
+        def _on_wake_phrase() -> None:
+            interaction_session.on_wake_detected()
+            # Never unlocks on wake-word alone; requires enrolled owner verification.
+            interaction_session.verify_and_unlock(b"")
+            bridge.notify_wake_word_detected()
+
+        wake_word_listener.set_callbacks(
+            on_detected=_on_wake_phrase,
+            on_error=lambda err: (
+                logger.warning("Wake-word listener error: %s", err),
+                bridge.refreshWakeWordDiagnostics(),
+            ),
         )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,

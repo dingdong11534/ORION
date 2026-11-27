@@ -44,6 +44,7 @@ class VoiceService:
         audio_out: AudioOutputPort,
         gate: HeavyWorkGate | None = None,
         settings: VoiceSettings | None = None,
+        on_ptt_active_changed: Callable[[bool], None] | None = None,
     ) -> None:
         self._stt = stt
         self._tts = tts
@@ -51,6 +52,7 @@ class VoiceService:
         self._audio_out = audio_out
         self._gate = gate or HeavyWorkGate()
         self._settings = settings or VoiceSettings()
+        self._on_ptt_active_changed = on_ptt_active_changed
         self._state = VoiceState.IDLE
         self._lock = threading.Lock()
         self._cancel_flag = threading.Event()
@@ -120,8 +122,10 @@ class VoiceService:
                 VoiceErrorCode.MICROPHONE_UNAVAILABLE,
                 "No microphone capture device is available.",
             )
-        # Starting a recording always stops active playback
+        # Starting a recording always stops active playback and pauses wake-word listener
         self.cancel_playback()
+        if self._on_ptt_active_changed is not None:
+            self._on_ptt_active_changed(True)
         self._cancel_flag.clear()
 
         fd, tmp_name = tempfile.mkstemp(prefix="orion_rec_", suffix=".wav")
@@ -133,6 +137,8 @@ class VoiceService:
         try:
             self._audio_in.start_recording(wav_path, device=self._settings.input_device)
         except Exception as exc:
+            if self._on_ptt_active_changed is not None:
+                self._on_ptt_active_changed(False)
             raise VoiceServiceError(
                 VoiceErrorCode.DEVICE_ERROR, f"Microphone capture error: {exc}"
             ) from exc
@@ -153,6 +159,8 @@ class VoiceService:
                 self._state = VoiceState.IDLE
             if wav is not None:
                 wav.unlink(missing_ok=True)
+            if self._on_ptt_active_changed is not None:
+                self._on_ptt_active_changed(False)
 
     def stop_recording_and_transcribe(self) -> TranscriptionResult:
         with self._lock:
@@ -192,6 +200,8 @@ class VoiceService:
             with self._lock:
                 self._recording_wav = None
                 self._state = VoiceState.IDLE
+            if self._on_ptt_active_changed is not None:
+                self._on_ptt_active_changed(False)
 
     def speak_text(
         self,
