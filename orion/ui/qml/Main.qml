@@ -64,6 +64,7 @@ ApplicationWindow {
     property var homeDashboard: ({})
     property var backgroundJobs: []
     property bool orbHidden: false
+    property bool orbExpanded: false
     property string productivityError: ""
     property string voiceErrorMessage: ""
     property string pendingDeleteId: ""
@@ -310,7 +311,6 @@ ApplicationWindow {
                 }
 
                 RowLayout {
-                    visible: !parent.parent.compactRail
                     Layout.fillWidth: true
                     spacing: Theme.spaceXs
                     OrionButton {
@@ -318,7 +318,11 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         compact: true
                         variant: root.sessionState === "unlocked" ? "secondary" : "primary"
-                        text: root.sessionState === "unlocked" ? "Lock" : "Unlock"
+                        text: parent.parent.parent.compactRail
+                            ? (root.sessionState === "unlocked" ? "L" : "U")
+                            : (root.sessionState === "unlocked" ? "Lock" : "Unlock")
+                        ToolTip.visible: parent.parent.parent.compactRail && hovered
+                        ToolTip.text: root.sessionState === "unlocked" ? "Lock ORION" : "Unlock ORION"
                         onClicked: {
                             if (typeof orion !== "undefined" && orion !== null)
                                 orion.toggleSessionLock()
@@ -326,12 +330,17 @@ ApplicationWindow {
                     }
                     OrionButton {
                         objectName: "hideToBackgroundButton"
+                        visible: !parent.parent.parent.compactRail
                         compact: true
                         variant: "quiet"
                         text: "Orb"
                         onClicked: {
-                            if (typeof orion !== "undefined" && orion !== null)
+                            root.orbHidden = false
+                            root.orbExpanded = false
+                            if (typeof orion !== "undefined" && orion !== null) {
+                                orion.loadBackgroundJobs()
                                 orion.setBackgroundMode(true)
+                            }
                         }
                     }
                 }
@@ -427,41 +436,214 @@ ApplicationWindow {
     Window {
         id: orionOrbWindow
         objectName: "orionOrbWindow"
+        transientParent: null
         visible: root.backgroundMode && !root.orbHidden
-        width: 72
-        height: 72
-        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        width: root.orbExpanded ? 300 : 72
+        height: root.orbExpanded ? 270 : 72
+        flags: Qt.FramelessWindowHint | Qt.Window
         color: "transparent"
         title: "ORION Orb"
+        Component.onCompleted: {
+            orionOrbWindow.transientParent = null
+        }
 
+        // Collapsed 72x72 circular Orb
         Rectangle {
+            id: collapsedOrbBody
+            objectName: "collapsedOrbBody"
+            visible: !root.orbExpanded
             anchors.fill: parent
             radius: 36
             color: root.sessionState === "unlocked" ? Theme.accent : Theme.surface
             border.width: 2
-            border.color: Theme.hairline
+            border.color: root.sessionState === "unlocked" ? Theme.onAccent : Theme.border
 
-            Text {
+            Column {
                 anchors.centerIn: parent
-                text: root.sessionState === "unlocked" ? "ORION" : "LOCK"
-                font.family: Theme.fontFamily
-                font.pixelSize: Theme.fontCaption
-                font.weight: Font.DemiBold
-                color: root.sessionState === "unlocked" ? "#FFFFFF" : Theme.text
-                textFormat: Text.PlainText
+                spacing: 2
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: root.sessionState === "unlocked" ? "ORION" : "LOCKED"
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 11
+                    font.weight: Font.DemiBold
+                    color: root.sessionState === "unlocked" ? Theme.onAccent : Theme.text
+                    textFormat: Text.PlainText
+                }
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    visible: root.backgroundJobs.length > 0
+                    text: root.backgroundJobs.length + " job" + (root.backgroundJobs.length === 1 ? "" : "s")
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 9
+                    color: root.sessionState === "unlocked" ? Theme.onAccent : Theme.textSecondary
+                    textFormat: Text.PlainText
+                }
             }
 
             MouseArea {
+                objectName: "orbMouseArea"
                 anchors.fill: parent
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 cursorShape: Qt.PointingHandCursor
+                property point pressPos: Qt.point(0, 0)
+                property bool dragged: false
+                onPressed: function(mouse) {
+                    pressPos = Qt.point(mouse.x, mouse.y)
+                    dragged = false
+                }
+                onPositionChanged: function(mouse) {
+                    if (pressed && !dragged) {
+                        const dx = mouse.x - pressPos.x
+                        const dy = mouse.y - pressPos.y
+                        if ((dx * dx + dy * dy) > 25) {
+                            dragged = true
+                            orionOrbWindow.startSystemMove()
+                        }
+                    }
+                }
                 onClicked: function(mouse) {
+                    if (dragged) return
                     if (mouse.button === Qt.RightButton) {
-                        root.orbHidden = true
+                        root.orbExpanded = true
+                        if (typeof orion !== "undefined" && orion !== null)
+                            orion.loadBackgroundJobs()
                         return
                     }
+                    root.orbExpanded = true
                     if (typeof orion !== "undefined" && orion !== null)
-                        orion.setBackgroundMode(false)
+                        orion.loadBackgroundJobs()
+                }
+            }
+        }
+
+        // Expanded compact Orb panel
+        Rectangle {
+            id: expandedOrbPanel
+            objectName: "expandedOrbPanel"
+            visible: root.orbExpanded
+            anchors.fill: parent
+            radius: 16
+            color: Theme.surface
+            border.width: 1
+            border.color: Theme.border
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: Theme.spaceMd
+                spacing: Theme.spaceSm
+
+                // Drag handle header
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spaceXs
+                    MouseArea {
+                        Layout.fillWidth: true
+                        implicitHeight: 24
+                        cursorShape: Qt.SizeAllCursor
+                        onPressed: orionOrbWindow.startSystemMove()
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: Theme.spaceXs
+                            Rectangle {
+                                width: 8; height: 8; radius: 4
+                                color: root.sessionState === "unlocked" ? Theme.accent : Theme.danger
+                            }
+                            Text {
+                                objectName: "orbStatusText"
+                                text: "ORION · " + root.sessionState.toUpperCase()
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontSecondary
+                                font.weight: Font.DemiBold
+                                color: Theme.text
+                                textFormat: Text.PlainText
+                            }
+                        }
+                    }
+                    OrionButton {
+                        objectName: "orbCollapseButton"
+                        text: "—"
+                        variant: "quiet"
+                        compact: true
+                        onClicked: root.orbExpanded = false
+                    }
+                    OrionButton {
+                        objectName: "orbHideButton"
+                        text: "Hide"
+                        variant: "quiet"
+                        compact: true
+                        onClicked: {
+                            root.orbExpanded = false
+                            root.orbHidden = true
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spaceXs
+                    OrionButton {
+                        objectName: "orbSessionLockButton"
+                        Layout.fillWidth: true
+                        compact: true
+                        variant: root.sessionState === "unlocked" ? "secondary" : "primary"
+                        text: root.sessionState === "unlocked" ? "Lock Session" : "Unlock Session"
+                        onClicked: {
+                            if (typeof orion !== "undefined" && orion !== null)
+                                orion.toggleSessionLock()
+                        }
+                    }
+                    OrionButton {
+                        objectName: "orbMicButton"
+                        compact: true
+                        variant: (typeof orion !== "undefined" && orion !== null && orion.voiceState === "recording") ? "danger" : "secondary"
+                        text: (typeof orion !== "undefined" && orion !== null && orion.voiceState === "recording") ? "Stop Mic" : "Mic"
+                        enabled: (typeof orion !== "undefined" && orion !== null) && orion.voiceAvailable
+                        onClicked: {
+                            if (typeof orion === "undefined" || orion === null) return
+                            if (orion.voiceState === "recording")
+                                orion.stopVoiceRecording()
+                            else
+                                orion.startVoiceRecording()
+                        }
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "Mic: " + ((typeof orion !== "undefined" && orion !== null) ? orion.voiceState : "idle")
+                        + " · Jobs: " + root.backgroundJobs.length
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontCaption
+                    color: Theme.textSecondary
+                    textFormat: Text.PlainText
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: (typeof orion !== "undefined" && orion !== null)
+                        ? (orion.wakeWordStatus + "\n" + orion.speakerVerificationStatus)
+                        : ""
+                    font.family: Theme.fontFamily
+                    font.pixelSize: 10
+                    color: Theme.textSecondary
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                }
+
+                Item { Layout.fillHeight: true }
+
+                OrionButton {
+                    objectName: "orbRestoreWindowButton"
+                    Layout.fillWidth: true
+                    compact: true
+                    variant: "primary"
+                    text: "Open ORION"
+                    onClicked: {
+                        root.orbExpanded = false
+                        if (typeof orion !== "undefined" && orion !== null)
+                            orion.setBackgroundMode(false)
+                    }
                 }
             }
         }

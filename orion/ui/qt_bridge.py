@@ -2134,6 +2134,18 @@ class OrionBridge(QObject):
             return "locked"
         return str(self._interaction_session.state)
 
+    @Property(str, notify=sessionStateChanged)
+    def wakeWordStatus(self) -> str:
+        if self._interaction_session is None:
+            return "Wake-word listener not configured"
+        return self._interaction_session.wake_word_status()
+
+    @Property(str, notify=sessionStateChanged)
+    def speakerVerificationStatus(self) -> str:
+        if self._interaction_session is None:
+            return "Voice unlock disabled"
+        return self._interaction_session.speaker_verification_status()
+
     @Property(bool, notify=backgroundModeChanged)
     def backgroundMode(self) -> bool:
         return self._background_mode
@@ -2141,20 +2153,25 @@ class OrionBridge(QObject):
     @Slot()
     def lockSession(self) -> None:
         if self._interaction_session is not None:
+            logger.info("UI requested manual session lock")
             self._interaction_session.lock()
 
     @Slot()
     def unlockSessionManual(self) -> None:
         if self._interaction_session is not None:
+            logger.info("UI requested manual session unlock")
             self._interaction_session.unlock_manual()
 
     @Slot()
     def toggleSessionLock(self) -> None:
         if self._interaction_session is None:
+            logger.warning("toggleSessionLock called without InteractionSession")
             return
         from orion.application.session.interaction_session import SessionState
 
-        if self._interaction_session.state == SessionState.UNLOCKED:
+        cur = self._interaction_session.state
+        logger.info("UI toggleSessionLock invoked (current=%s)", cur)
+        if cur == SessionState.UNLOCKED:
             self._interaction_session.lock()
         else:
             self._interaction_session.unlock_manual()
@@ -2163,6 +2180,7 @@ class OrionBridge(QObject):
     def setBackgroundMode(self, enabled: bool) -> None:
         val = bool(enabled)
         if self._background_mode != val:
+            logger.info("UI setBackgroundMode -> %s", val)
             self._background_mode = val
             self.backgroundModeChanged.emit(val)
 

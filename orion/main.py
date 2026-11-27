@@ -300,10 +300,30 @@ def main() -> int:
         from orion.infrastructure.browser.playwright_browser_service import PlaywrightBrowserService
         from orion.infrastructure.downloads.inbox_service import OrionInboxService
         from orion.infrastructure.jobs.repository import SqliteBackgroundJobStore
+        from orion.infrastructure.voice.wake_word import (
+            LocalSpeakerVerifier,
+            VoskWakeWordListener,
+        )
 
         job_store = SqliteBackgroundJobStore(session_factory)
         job_supervisor = BackgroundJobSupervisor(job_store)
-        interaction_session = InteractionSession(enabled=True)
+        speaker_verifier = LocalSpeakerVerifier()
+        wake_word_listener = VoskWakeWordListener(phrase="hey orion")
+        interaction_session = InteractionSession(
+            enabled=True,
+            wake_word=wake_word_listener,
+            speaker_verifier=speaker_verifier,
+        )
+
+        def _on_wake_phrase() -> None:
+            interaction_session.on_wake_detected()
+            # Never unlocks on wake-word alone; requires enrolled owner verification.
+            interaction_session.verify_and_unlock(b"")
+
+        wake_word_listener.set_callbacks(
+            on_detected=_on_wake_phrase,
+            on_error=lambda err: logger.warning("Wake-word listener error: %s", err),
+        )
         browser_service = PlaywrightBrowserService()
         app_registry = ApplicationRegistryService(session_factory, audit_store=job_store)
         app_registry.detect_default_apps()
@@ -361,9 +381,22 @@ def main() -> int:
 
         if "--background" in sys.argv[1:]:
             bridge.setBackgroundMode(True)
+            app.setQuitOnLastWindowClosed(False)
+
+        bridge.backgroundModeChanged.connect(lambda bg: app.setQuitOnLastWindowClosed(not bg))
 
         return app.exec()
     finally:
+        if "interaction_session" in locals() and interaction_session is not None:
+            try:
+                interaction_session.shutdown()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        if "voice_service" in locals() and voice_service is not None:
+            try:
+                voice_service.cancel_recording()
+            except Exception:  # noqa: BLE001, S110
+                pass
         if "browser_service" in locals() and browser_service is not None:
             try:
                 browser_service.close_browser()
