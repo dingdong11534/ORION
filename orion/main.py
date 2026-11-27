@@ -33,7 +33,7 @@ from orion.ui.qt_bridge import OrionBridge
 logger = logging.getLogger(__name__)
 
 # Maintained for backward compatibility with existing tests
-_EXPECTED_ALEMBIC_REVISION = "0009"
+_EXPECTED_ALEMBIC_REVISION = "0010"
 
 
 def activate_window(engine: QQmlApplicationEngine) -> None:
@@ -255,6 +255,10 @@ def main() -> int:
 
         from orion.application.identity.capabilities import CapabilityRegistry
         from orion.application.identity.identity_service import OrionIdentityService
+        from orion.application.memory.memory_service import PersonalMemoryService
+        from orion.infrastructure.memory.repository import SqlitePersonalMemoryStore
+
+        memory_service = PersonalMemoryService(SqlitePersonalMemoryStore(session_factory))
 
         capability_registry = CapabilityRegistry(
             model_provider=model_provider,
@@ -263,6 +267,7 @@ def main() -> int:
             task_service=task_service,
             habit_service=habit_service,
             voice_service=voice_service,
+            memory_service=memory_service,
         )
         identity_service = OrionIdentityService(capability_registry)
 
@@ -273,6 +278,7 @@ def main() -> int:
             retrieval_service=retrieval_service,
             productivity_coordinator=productivity_coordinator,
             identity_service=identity_service,
+            memory_service=memory_service,
         )
 
         # 8. Construct OrionBridge & coordinate graceful lifecycle
@@ -283,6 +289,7 @@ def main() -> int:
             habit_service=habit_service,
             productivity_coordinator=productivity_coordinator,
             voice_service=voice_service,
+            memory_service=memory_service,
         )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,

@@ -175,6 +175,7 @@ class OrionBridge(QObject):
     voiceAssetStatusChanged = Signal()
     voiceTranscriptReady = Signal(str)
     voiceError = Signal(str, str)
+    memoryDataLoaded = Signal(dict)
 
     def __init__(
         self,
@@ -190,6 +191,7 @@ class OrionBridge(QObject):
         habit_service: HabitService | None = None,
         productivity_coordinator: ProductivityActionCoordinator | None = None,
         voice_service: Any = None,
+        memory_service: Any = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
@@ -214,6 +216,7 @@ class OrionBridge(QObject):
         self._knowledge_service: KnowledgeService | None = knowledge_service
         self._task_service: TaskService | None = task_service
         self._voice_service: Any = voice_service
+        self._memory_service: Any = memory_service
         self._voice_state: str = "idle"
         self._theme_mode: str = "light"
         if getattr(self._service, "_settings_store", None) is not None:
@@ -1980,3 +1983,83 @@ class OrionBridge(QObject):
             return
         self._voice_service.cancel_playback()
         self._set_voice_state("idle")
+
+    # ------------------------------------------------------------------
+    # Personal Memory & Profile (Milestone 4.12 Phase D)
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def loadPersonalMemory(self) -> None:
+        if self._memory_service is None:
+            return
+        prof = self._memory_service.get_profile()
+        mems = self._memory_service.list_memories()
+        self.memoryDataLoaded.emit(
+            {
+                "profile": {
+                    "preferred_name": prof.preferred_name or "",
+                    "timezone": prof.timezone,
+                    "response_preferences": prof.response_preferences or "",
+                    "work_study_preferences": prof.work_study_preferences or "",
+                },
+                "memories": [
+                    {
+                        "id": m.id,
+                        "category": m.category.value,
+                        "title": m.title,
+                        "content": m.content,
+                        "status": m.status.value,
+                        "source": m.source,
+                    }
+                    for m in mems
+                ],
+            }
+        )
+
+    @Slot(str, str, str, str)
+    def saveUserProfile(
+        self,
+        preferred_name: str,
+        timezone: str,
+        response_preferences: str,
+        work_study_preferences: str,
+    ) -> None:
+        if self._memory_service is None:
+            return
+        self._memory_service.save_profile(
+            preferred_name=preferred_name,
+            timezone=timezone,
+            response_preferences=response_preferences,
+            work_study_preferences=work_study_preferences,
+        )
+        self.loadPersonalMemory()
+
+    @Slot(str, str, str)
+    def addPersonalMemory(self, category: str, title: str, content: str) -> None:
+        if self._memory_service is None or not content.strip():
+            return
+        from orion.application.memory.contracts import MemoryCategory
+
+        self._memory_service.add_memory(
+            category=MemoryCategory(category.strip().lower() or "fact"),
+            title=title.strip() or content.strip()[:50],
+            content=content.strip(),
+            source="settings_ui",
+        )
+        self.loadPersonalMemory()
+
+    @Slot(str)
+    def markMemoryStale(self, memory_id: str) -> None:
+        if self._memory_service is None:
+            return
+        from orion.application.memory.contracts import MemoryStatus
+
+        self._memory_service.update_memory(memory_id, status=MemoryStatus.STALE)
+        self.loadPersonalMemory()
+
+    @Slot(str)
+    def deletePersonalMemory(self, memory_id: str) -> None:
+        if self._memory_service is None:
+            return
+        self._memory_service.delete_memory(memory_id)
+        self.loadPersonalMemory()

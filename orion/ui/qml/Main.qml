@@ -57,6 +57,8 @@ ApplicationWindow {
     property var prodUnscheduledTasks: []
     property var prodAllTasks: []
     property var prodHabits: []
+    property var memoryProfile: ({ preferred_name: "", timezone: "Asia/Kolkata" })
+    property var personalMemories: []
     property string productivityError: ""
     property string voiceErrorMessage: ""
     property string pendingDeleteId: ""
@@ -86,6 +88,8 @@ ApplicationWindow {
             orion.cancelVoiceRecording()
         if (activePage === "productivity" && typeof orion !== "undefined" && orion !== null)
             orion.loadProductivityData("", "", "", "priority_due")
+        if (activePage === "settings" && typeof orion !== "undefined" && orion !== null)
+            orion.loadPersonalMemory()
     }
 
     onClosing: {

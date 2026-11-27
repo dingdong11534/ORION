@@ -276,6 +276,11 @@ Item {
             root.voiceErrorMessage = msg || ("Voice error: " + code)
         }
 
+        function onMemoryDataLoaded(payload) {
+            root.memoryProfile = payload.profile || ({ preferred_name: "", timezone: "Asia/Kolkata" })
+            root.personalMemories = payload.memories || []
+        }
+
         function onApprovalRequested(requestDict) {
             pendingApprovalsModel.append(requestDict)
             root.approvalRemainingSeconds = 60

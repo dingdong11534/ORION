@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -467,4 +468,54 @@ class ConversationProductivityContextModel(Base):
     last_habit_turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_list_turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pending_confirmation_action_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+
+class UserProfileModel(Base):
+    """Trusted user profile (explicitly edited by user, never silently mutated by LLM)."""
+
+    __tablename__ = "user_profile"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
+    preferred_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Kolkata")
+    response_preferences: Mapped[str | None] = mapped_column(Text, nullable=True)
+    work_study_preferences: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+
+class PersonalMemoryModel(Base):
+    """Local reviewable long-term memory, project, goal, or routine."""
+
+    __tablename__ = "personal_memories"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="fact")
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="user_explicit")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+    __table_args__ = (Index("idx_personal_memories_cat_status", "category", "status"),)
+
+
+class LocalReminderModel(Base):
+    """Persistent local reminder with quiet hours."""
+
+    __tablename__ = "local_reminders"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False, default="checkin")
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remind_time: Mapped[str] = mapped_column(String(5), nullable=False, default="09:00")
+    quiet_start: Mapped[str] = mapped_column(String(5), nullable=False, default="22:00")
+    quiet_end: Mapped[str] = mapped_column(String(5), nullable=False, default="07:00")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_triggered_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)

@@ -184,6 +184,104 @@ Rectangle {
                     }
                 }
             }
+            // Personal Memory & Profile
+            OrionCard {
+                Layout.fillWidth: true
+                implicitHeight: memCol.implicitHeight + Theme.spaceLg * 2
+
+                ColumnLayout {
+                    id: memCol
+                    anchors.fill: parent
+                    anchors.margins: Theme.spaceLg
+                    spacing: Theme.spaceMd
+
+                    OrionSectionHeader {
+                        title: "Personal Memory & Profile"
+                        subtitle: "Review, edit, or delete saved facts, projects, and goals"
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spaceSm
+                        OrionTextField {
+                            id: profNameField
+                            Layout.fillWidth: true
+                            placeholderText: "Preferred name"
+                            text: root.memoryProfile.preferred_name || ""
+                        }
+                        OrionTextField {
+                            id: profTzField
+                            Layout.preferredWidth: 160
+                            placeholderText: "Timezone"
+                            text: root.memoryProfile.timezone || "Asia/Kolkata"
+                        }
+                        OrionButton {
+                            text: "Save Profile"
+                            variant: "primary"
+                            compact: true
+                            onClicked: if (typeof orion !== "undefined" && orion !== null)
+                                orion.saveUserProfile(profNameField.text, profTzField.text, "", "")
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spaceSm
+                        ComboBox {
+                            id: memCatBox
+                            model: ["fact", "project", "goal", "routine"]
+                            implicitHeight: Theme.controlHeight
+                        }
+                        OrionTextField {
+                            id: memContentField
+                            Layout.fillWidth: true
+                            placeholderText: "Add a memory (e.g. Preparing for internships)..."
+                        }
+                        OrionButton {
+                            text: "Remember"
+                            variant: "secondary"
+                            compact: true
+                            enabled: memContentField.text.trim().length > 0
+                            onClicked: {
+                                if (typeof orion !== "undefined" && orion !== null) {
+                                    orion.addPersonalMemory(memCatBox.currentText, "", memContentField.text.trim())
+                                    memContentField.text = ""
+                                }
+                            }
+                        }
+                    }
+
+                    Repeater {
+                        model: root.personalMemories
+                        delegate: RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceSm
+                            Text {
+                                Layout.fillWidth: true
+                                text: "[" + modelData.category + (modelData.status === "stale" ? " · stale" : "") + "] " + modelData.content
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontSecondary
+                                color: modelData.status === "stale" ? Theme.textSecondary : Theme.text
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
+                            }
+                            OrionButton {
+                                text: "Stale"
+                                variant: "quiet"
+                                compact: true
+                                visible: modelData.status !== "stale"
+                                onClicked: orion.markMemoryStale(modelData.id)
+                            }
+                            OrionButton {
+                                text: "Delete"
+                                variant: "danger"
+                                compact: true
+                                onClicked: orion.deletePersonalMemory(modelData.id)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
