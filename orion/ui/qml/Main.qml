@@ -6,7 +6,7 @@ import "pages"
 
 ApplicationWindow {
     id: root
-    visible: true
+    visible: !backgroundMode
     width: 1280
     height: 800
     minimumWidth: 880
@@ -27,6 +27,8 @@ ApplicationWindow {
     readonly property string providerDisplay: (typeof orion !== "undefined" && orion !== null) ? orion.providerDisplay : "Local"
     readonly property bool isSimulatedProvider: (typeof orion !== "undefined" && orion !== null) ? orion.isSimulatedProvider : false
     readonly property string supportedKnowledgeFormats: (typeof orion !== "undefined" && orion !== null) ? orion.supportedKnowledgeFormats : ""
+    readonly property string sessionState: (typeof orion !== "undefined" && orion !== null) ? orion.sessionState : "locked"
+    readonly property bool backgroundMode: (typeof orion !== "undefined" && orion !== null) ? orion.backgroundMode : false
     readonly property int maxThinkingChars: 32768
 
     property string activePage: "home" // "home" | "chat" | "knowledge" | "workspace" | "productivity" | "settings"
@@ -60,6 +62,7 @@ ApplicationWindow {
     property var memoryProfile: ({ preferred_name: "", timezone: "Asia/Kolkata" })
     property var personalMemories: []
     property var homeDashboard: ({})
+    property var backgroundJobs: []
     property string productivityError: ""
     property string voiceErrorMessage: ""
     property string pendingDeleteId: ""
@@ -89,8 +92,10 @@ ApplicationWindow {
             orion.cancelVoiceRecording()
         if (activePage === "productivity" && typeof orion !== "undefined" && orion !== null)
             orion.loadProductivityData("", "", "", "priority_due")
-        if (activePage === "settings" && typeof orion !== "undefined" && orion !== null)
+        if (activePage === "settings" && typeof orion !== "undefined" && orion !== null) {
             orion.loadPersonalMemory()
+            orion.loadBackgroundJobs()
+        }
     }
 
     onClosing: {
@@ -303,6 +308,33 @@ ApplicationWindow {
                     onClicked: root.activePage = "settings"
                 }
 
+                RowLayout {
+                    visible: !parent.parent.compactRail
+                    Layout.fillWidth: true
+                    spacing: Theme.spaceXs
+                    OrionButton {
+                        objectName: "sessionLockButton"
+                        Layout.fillWidth: true
+                        compact: true
+                        variant: root.sessionState === "unlocked" ? "secondary" : "primary"
+                        text: root.sessionState === "unlocked" ? "Lock" : "Unlock"
+                        onClicked: {
+                            if (typeof orion !== "undefined" && orion !== null)
+                                orion.toggleSessionLock()
+                        }
+                    }
+                    OrionButton {
+                        objectName: "hideToBackgroundButton"
+                        compact: true
+                        variant: "quiet"
+                        text: "Orb"
+                        onClicked: {
+                            if (typeof orion !== "undefined" && orion !== null)
+                                orion.setBackgroundMode(true)
+                        }
+                    }
+                }
+
                 ColumnLayout {
                     visible: !parent.parent.compactRail
                     Layout.fillWidth: true
@@ -389,5 +421,43 @@ ApplicationWindow {
 
     OrionExecutionDrawer {
         root: root
+    }
+
+    Window {
+        id: orionOrbWindow
+        objectName: "orionOrbWindow"
+        visible: root.backgroundMode
+        width: 72
+        height: 72
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        color: "transparent"
+        title: "ORION Orb"
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 36
+            color: root.sessionState === "unlocked" ? Theme.accent : Theme.surface
+            border.width: 2
+            border.color: Theme.hairline
+
+            Text {
+                anchors.centerIn: parent
+                text: root.sessionState === "unlocked" ? "ORION" : "LOCK"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontCaption
+                font.weight: Font.DemiBold
+                color: root.sessionState === "unlocked" ? "#FFFFFF" : Theme.text
+                textFormat: Text.PlainText
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    if (typeof orion !== "undefined" && orion !== null)
+                        orion.setBackgroundMode(false)
+                }
+            }
+        }
     }
 }

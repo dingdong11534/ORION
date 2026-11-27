@@ -182,6 +182,11 @@ class OrionBridge(QObject):
     memoryDataLoaded = Signal(dict)
     homeDashboardLoaded = Signal(dict)
 
+    # Session, Background Jobs & Orb signals (Milestone 4.14 Phase E)
+    sessionStateChanged = Signal(str)
+    backgroundModeChanged = Signal(bool)
+    backgroundJobsLoaded = Signal(list)
+
     def __init__(
         self,
         assistant_service: AssistantService,
@@ -198,6 +203,9 @@ class OrionBridge(QObject):
         voice_service: Any = None,
         memory_service: Any = None,
         session_factory: Any = None,
+        interaction_session: Any = None,
+        job_store: Any = None,
+        job_supervisor: Any = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
@@ -224,6 +232,14 @@ class OrionBridge(QObject):
         self._voice_service: Any = voice_service
         self._memory_service: Any = memory_service
         self._session_factory: Any = session_factory
+        self._interaction_session: Any = interaction_session
+        self._job_store: Any = job_store
+        self._job_supervisor: Any = job_supervisor
+        self._background_mode: bool = False
+        if self._interaction_session is not None:
+            self._interaction_session.add_listener(
+                lambda state: self.sessionStateChanged.emit(str(state))
+            )
         self._voice_state: str = "idle"
         self._theme_mode: str = "light"
         if getattr(self._service, "_settings_store", None) is not None:
@@ -2107,3 +2123,78 @@ class OrionBridge(QObject):
             memory_service=self._memory_service,
         )
         self.homeDashboardLoaded.emit(data)
+
+    # ------------------------------------------------------------------
+    # InteractionSession & Background Jobs (Milestone 4.14 Phase E)
+    # ------------------------------------------------------------------
+
+    @Property(str, notify=sessionStateChanged)
+    def sessionState(self) -> str:
+        if self._interaction_session is None:
+            return "locked"
+        return str(self._interaction_session.state)
+
+    @Property(bool, notify=backgroundModeChanged)
+    def backgroundMode(self) -> bool:
+        return self._background_mode
+
+    @Slot()
+    def lockSession(self) -> None:
+        if self._interaction_session is not None:
+            self._interaction_session.lock()
+
+    @Slot()
+    def unlockSessionManual(self) -> None:
+        if self._interaction_session is not None:
+            self._interaction_session.unlock_manual()
+
+    @Slot()
+    def toggleSessionLock(self) -> None:
+        if self._interaction_session is None:
+            return
+        from orion.application.session.interaction_session import SessionState
+
+        if self._interaction_session.state == SessionState.UNLOCKED:
+            self._interaction_session.lock()
+        else:
+            self._interaction_session.unlock_manual()
+
+    @Slot(bool)
+    def setBackgroundMode(self, enabled: bool) -> None:
+        val = bool(enabled)
+        if self._background_mode != val:
+            self._background_mode = val
+            self.backgroundModeChanged.emit(val)
+
+    @Slot()
+    def loadBackgroundJobs(self) -> None:
+        if self._job_store is None:
+            self.backgroundJobsLoaded.emit([])
+            return
+        jobs = self._job_store.list_jobs(limit=25)
+        payload = [
+            {
+                "id": j.id,
+                "summary": j.user_request_summary,
+                "workflow_type": j.workflow_type,
+                "status": str(j.status),
+                "current_step_index": j.current_step_index,
+                "total_steps": j.total_steps,
+                "approval_reason": j.approval_reason or "",
+                "error_summary": j.error_summary or "",
+            }
+            for j in jobs
+        ]
+        self.backgroundJobsLoaded.emit(payload)
+
+    @Slot(str)
+    def approveBackgroundJob(self, job_id: str) -> None:
+        if self._job_supervisor is not None:
+            self._job_supervisor.approve_job(job_id)
+            self.loadBackgroundJobs()
+
+    @Slot(str)
+    def cancelBackgroundJob(self, job_id: str) -> None:
+        if self._job_supervisor is not None:
+            self._job_supervisor.cancel_job(job_id)
+            self.loadBackgroundJobs()

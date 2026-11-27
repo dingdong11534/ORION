@@ -285,6 +285,10 @@ Item {
             root.homeDashboard = payload || ({})
         }
 
+        function onBackgroundJobsLoaded(jobs) {
+            root.backgroundJobs = jobs || []
+        }
+
         function onApprovalRequested(requestDict) {
             pendingApprovalsModel.append(requestDict)
             root.approvalRemainingSeconds = 60

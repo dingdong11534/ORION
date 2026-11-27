@@ -282,6 +282,96 @@ Rectangle {
                     }
                 }
             }
+
+            // Automation Session & Background Jobs (Milestone 4.14)
+            OrionCard {
+                Layout.fillWidth: true
+                implicitHeight: sessionCol.implicitHeight + Theme.spaceLg * 2
+
+                ColumnLayout {
+                    id: sessionCol
+                    anchors.fill: parent
+                    anchors.margins: Theme.spaceLg
+                    spacing: Theme.spaceMd
+
+                    OrionSectionHeader {
+                        title: "Automation Session & Background Jobs"
+                        subtitle: "Locking ORION never cancels already-authorized background jobs"
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Theme.spaceSm
+                        Text {
+                            objectName: "settingsSessionStateText"
+                            Layout.fillWidth: true
+                            text: "Session: " + root.sessionState.toUpperCase()
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.fontSecondary
+                            color: Theme.text
+                            textFormat: Text.PlainText
+                        }
+                        OrionButton {
+                            text: root.sessionState === "unlocked" ? "Lock Session" : "Unlock Session"
+                            variant: "secondary"
+                            compact: true
+                            onClicked: if (typeof orion !== "undefined" && orion !== null) orion.toggleSessionLock()
+                        }
+                        OrionButton {
+                            text: "Hide to Orb"
+                            variant: "quiet"
+                            compact: true
+                            onClicked: if (typeof orion !== "undefined" && orion !== null) orion.setBackgroundMode(true)
+                        }
+                        OrionButton {
+                            text: "Refresh Jobs"
+                            variant: "quiet"
+                            compact: true
+                            onClicked: if (typeof orion !== "undefined" && orion !== null) orion.loadBackgroundJobs()
+                        }
+                    }
+
+                    Text {
+                        visible: root.backgroundJobs.length === 0
+                        text: "No background automation jobs recorded."
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textSecondary
+                        textFormat: Text.PlainText
+                    }
+
+                    Repeater {
+                        model: root.backgroundJobs
+                        delegate: RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceSm
+                            Text {
+                                Layout.fillWidth: true
+                                text: "[" + modelData.status + "] " + modelData.summary + " (" + modelData.current_step_index + "/" + modelData.total_steps + ")"
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontSecondary
+                                color: Theme.text
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
+                            }
+                            OrionButton {
+                                text: "Approve"
+                                variant: "primary"
+                                compact: true
+                                visible: modelData.status === "waiting_for_approval"
+                                onClicked: orion.approveBackgroundJob(modelData.id)
+                            }
+                            OrionButton {
+                                text: "Cancel"
+                                variant: "danger"
+                                compact: true
+                                visible: modelData.status === "queued" || modelData.status === "running" || modelData.status === "waiting_for_approval"
+                                onClicked: orion.cancelBackgroundJob(modelData.id)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

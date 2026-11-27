@@ -294,6 +294,21 @@ def main() -> int:
             briefing_service=briefing_service,
         )
 
+        from orion.application.jobs.supervisor import BackgroundJobSupervisor
+        from orion.application.launcher.app_registry import ApplicationRegistryService
+        from orion.application.session.interaction_session import InteractionSession
+        from orion.infrastructure.browser.playwright_browser_service import PlaywrightBrowserService
+        from orion.infrastructure.downloads.inbox_service import OrionInboxService
+        from orion.infrastructure.jobs.repository import SqliteBackgroundJobStore
+
+        job_store = SqliteBackgroundJobStore(session_factory)
+        job_supervisor = BackgroundJobSupervisor(job_store)
+        interaction_session = InteractionSession(enabled=True)
+        browser_service = PlaywrightBrowserService()
+        app_registry = ApplicationRegistryService(session_factory, audit_store=job_store)
+        app_registry.detect_default_apps()
+        _inbox_service = OrionInboxService()
+
         # 8. Construct OrionBridge & coordinate graceful lifecycle
         bridge = OrionBridge(
             assistant_service=assistant_service,
@@ -304,6 +319,9 @@ def main() -> int:
             voice_service=voice_service,
             memory_service=memory_service,
             session_factory=session_factory,
+            interaction_session=interaction_session,
+            job_store=job_store,
+            job_supervisor=job_supervisor,
         )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,
@@ -341,8 +359,16 @@ def main() -> int:
             print("ERROR: Failed to load ORION interface.", file=sys.stderr)
             return 1
 
+        if "--background" in sys.argv[1:]:
+            bridge.setBackgroundMode(True)
+
         return app.exec()
     finally:
+        if "browser_service" in locals() and browser_service is not None:
+            try:
+                browser_service.close_browser()
+            except Exception:  # noqa: BLE001, S110
+                pass
         if lifecycle is not None:
             # aboutToQuit uses the default 5 s timeout; this final call blocks
             # indefinitely so the process never exits with active workers.

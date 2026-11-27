@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ORION Assistant
+Comment=Local-first personal assistant (starts in background/locked session mode)
+Exec=%h/Projects/ORION/.venv/bin/python -m orion.main --background
+Terminal=false
+Categories=Utility;Office;
+X-GNOME-Autostart-enabled=true
