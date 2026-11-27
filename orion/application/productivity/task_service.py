@@ -11,6 +11,7 @@ from orion.application.productivity.contracts import (
     TaskStatus,
 )
 from orion.application.productivity.ports import ClockPort, TaskStorePort
+from orion.application.productivity.target_resolver import strip_markdown
 
 _UNSET = object()
 
@@ -31,7 +32,7 @@ class TaskService:
         due_at: datetime | None = None,
         due_is_date_only: bool = False,
     ) -> TaskRecord:
-        clean_title = (title or "").strip()
+        clean_title = strip_markdown(title or "")
         if not clean_title:
             raise ValueError("Task title is required.")
         return self._store.create_task(

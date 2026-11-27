@@ -41,12 +41,12 @@ class _FixedClock:
 @pytest.fixture()
 def prod_env(tmp_path: Path):
     from orion.infrastructure.persistence.database import (
+        create_db_engine,
         create_session_factory,
-        create_sqlite_engine,
     )
     from orion.infrastructure.persistence.models import Base
 
-    engine = create_sqlite_engine(tmp_path / "test.db")
+    engine = create_db_engine(tmp_path / "test.db")
     Base.metadata.create_all(engine)
     sf = create_session_factory(engine)
     clock = _FixedClock(datetime(2026, 11, 27, 5, 30, tzinfo=UTC), "Asia/Kolkata")
@@ -57,9 +57,6 @@ def prod_env(tmp_path: Path):
     engine.dispose()
 
 
-@pytest.mark.xfail(
-    strict=True, reason="3.1: 'add one as taask' falls through to NONE instead of clarify"
-)
 def test_repro_3_1_vague_task_creation_clarifies(prod_env):
     _, _, coord, _ = prod_env
     res = coord.handle_message("add one as taask", conversation_id="conv_1")
@@ -67,9 +64,6 @@ def test_repro_3_1_vague_task_creation_clarifies(prod_env):
     assert res.status == "clarify"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="3.1: 'Show me my tasks and habits for today.' omits unscheduled/habits"
-)
 def test_repro_3_1_today_query_includes_unscheduled_and_habits(prod_env):
     tasks, habits, coord, _ = prod_env
     tasks.create_task("Complete coa unit 4 by 4pm", priority=TaskPriority.MEDIUM)
@@ -80,7 +74,6 @@ def test_repro_3_1_today_query_includes_unscheduled_and_habits(prod_env):
     assert "reading" in res.summary
 
 
-@pytest.mark.xfail(strict=True, reason="3.1: typo tolerance edit distance 1 not yet supported")
 def test_repro_3_1_target_resolution_typo_tolerance(prod_env):
     tasks, _, _, _ = prod_env
     t = tasks.create_task("Complete DBMS Unit 4", priority=TaskPriority.MEDIUM)
@@ -91,7 +84,6 @@ def test_repro_3_1_target_resolution_typo_tolerance(prod_env):
     assert res2.matched_id == t2.id
 
 
-@pytest.mark.xfail(strict=True, reason="3.2: habit/task extraction spans sentence boundaries")
 def test_repro_3_2_sentence_splitting_before_extraction():
     interp = ProductivityIntentInterpreter()
     p = interp.interpret("I completed my reading today.I completed my reading today.")

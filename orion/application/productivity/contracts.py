@@ -183,6 +183,7 @@ class ProductivityProposal(BaseModel):
     task_bucket: str | None = None
     clarification_question: str | None = None
     uses_context_reference: bool = False
+    ordinal_index: int | None = None  # 1-based index ("the second one" -> 2)
 
 
 class TargetResolutionStatus(StrEnum):

@@ -446,3 +446,24 @@ class ProductivityActionRecordModel(Base):
         Index("idx_productivity_actions_conv", "conversation_id"),
         Index("idx_productivity_actions_created", "created_at"),
     )
+
+
+class ConversationProductivityContextModel(Base):
+    """Persisted per-conversation productivity entity context (IDs only, no chat payloads)."""
+
+    __tablename__ = "conversation_productivity_context"
+
+    conversation_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_habit_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_list_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    last_list_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_entity_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    user_turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_task_turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_habit_turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_list_turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pending_confirmation_action_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)

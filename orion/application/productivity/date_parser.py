@@ -43,8 +43,8 @@ _NUM_WORDS = {
     "thirty": 30,
 }
 
-_TIME_RE = re.compile(r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.IGNORECASE)
-_TIME_24_RE = re.compile(r"\b(?:at\s+)([01]?\d|2[0-3]):([0-5]\d)\b", re.IGNORECASE)
+_TIME_RE = re.compile(r"\b(?:(?:at|by)\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.IGNORECASE)
+_TIME_24_RE = re.compile(r"\b(?:(?:at|by)\s+)([01]?\d|2[0-3]):([0-5]\d)\b", re.IGNORECASE)
 _IN_DAYS_RE = re.compile(
     r"\bin\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen|thirty)\s+days?\b",
     re.IGNORECASE,

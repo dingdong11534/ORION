@@ -39,10 +39,11 @@ _DATE_TAIL_RE = re.compile(
     r"(?:(?:by|for|on|until|due(?:\s+on)?|to)\s+)?"
     r"(?:day\s+after\s+tomorrow"
     r"|tomorrow(?:\s+(?:morning|afternoon|evening|night|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?))?"
-    r"|today(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?"
+    r"|today(?:\s+(?:at|by)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?"
     r"|tonight"
     r"|in\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|fourteen|thirty)\s+days?"
-    r"|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))"
+    r"|(?:at|by)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)"
+    r"|(?:at|by)\s+[01]?\d:[0-5]\d)"
     r"|(?:by|for|on|until|due(?:\s+on)?|to)\s+"
     r"(?:(?:this|next)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
     r"|end\s+of\s+(?:this|the)\s+week"
@@ -73,7 +74,8 @@ _NEGATIVE_GUARD_RE = re.compile(
 
 
 def _clean_title(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip(" .!?,;:\"'")).strip()
+    no_md = re.sub(r"[*_`~#]", "", text or "")
+    return re.sub(r"\s+", " ", no_md.strip(" .!?,;:\"'")).strip()
 
 
 def _extract_priority(text: str) -> tuple[TaskPriority | None, str]:
@@ -130,11 +132,48 @@ def _extract_freq_target(text: str) -> tuple[HabitFrequency | None, int | None]:
     return freq, target
 
 
+_ORDINALS = {
+    "first": 1,
+    "1st": 1,
+    "second": 2,
+    "2nd": 2,
+    "third": 3,
+    "3rd": 3,
+    "fourth": 4,
+    "4th": 4,
+    "fifth": 5,
+    "5th": 5,
+    "sixth": 6,
+    "6th": 6,
+    "seventh": 7,
+    "7th": 7,
+    "eighth": 8,
+    "8th": 8,
+    "ninth": 9,
+    "9th": 9,
+    "tenth": 10,
+    "10th": 10,
+}
+
+_VAGUE_TASK_CREATE_RE = re.compile(
+    r"^(?:add+|create|new|make)\s+(?:one\s+(?:as\s+)?|a\s+)?(?:task|taask|tsk)[.!?]*$",
+    re.IGNORECASE,
+)
+
+_VAGUE_HABIT_CREATE_RE = re.compile(
+    r"^(?:add+|create|new|start)\s+(?:one\s+(?:as\s+)?|a\s+)?(?:daily|weekly|monthly\s+)?habit[.!?]*$",
+    re.IGNORECASE,
+)
+
+
 def _uses_pronoun(target: str) -> bool:
     return target.lower().strip() in {
         "it",
         "that",
         "this",
+        "one",
+        "that one",
+        "this one",
         "that task",
         "this task",
         "the task",
@@ -145,6 +184,37 @@ def _uses_pronoun(target: str) -> bool:
     }
 
 
+def _extract_ordinal(target: str) -> int | None:
+    low = target.lower().strip()
+    m_hash = re.match(r"^(?:number\s+|#\s*)(\d+)$", low)
+    if m_hash:
+        idx = int(m_hash.group(1))
+        return idx if 1 <= idx <= 10 else None
+    m_ord = re.match(
+        r"^(?:the\s+)?(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|sixth|6th|seventh|7th|eighth|8th|ninth|9th|tenth|10th)(?:\s+(?:one|task|habit))?$",
+        low,
+    )
+    if m_ord:
+        return _ORDINALS.get(m_ord.group(1))
+    return None
+
+
+def _split_sentences(message: str) -> list[str]:
+    """Split input on sentence boundaries (., !, ?, newline) without breaking ISO dates/times."""
+    # Protect decimal/time dots if any, split on [.!?] followed by whitespace, uppercase, or end
+    parts = re.split(r"(?<=[.!?])(?:\s+|(?=[A-Z]))|\n+", (message or "").strip())
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _target_fields(target: str) -> tuple[str | None, bool, int | None]:
+    ord_idx = _extract_ordinal(target)
+    if ord_idx is not None:
+        return None, True, ord_idx
+    if _uses_pronoun(target):
+        return None, True, None
+    return target, False, None
+
+
 class ProductivityIntentInterpreter:
     """Constrained deterministic interpreter producing strict ProductivityProposal contracts.
 
@@ -153,18 +223,43 @@ class ProductivityIntentInterpreter:
     """
 
     def interpret(self, message: str) -> ProductivityProposal:
-        raw = (message or "").strip()
-        if not raw or len(raw) > 500:
+        raw_full = (message or "").strip()
+        if not raw_full or len(raw_full) > 500:
             return ProductivityProposal(intent=ProductivityIntent.NONE)
 
+        low_full = raw_full.lower()
+        if _NEGATIVE_GUARD_RE.match(low_full):
+            return ProductivityProposal(intent=ProductivityIntent.NONE)
+        if "=== begin untrusted" in low_full or "ignore previous instructions" in low_full:
+            return ProductivityProposal(intent=ProductivityIntent.NONE)
+
+        sentences = _split_sentences(raw_full)
+        if not sentences:
+            return ProductivityProposal(intent=ProductivityIntent.NONE)
+
+        # If all sentences are identical duplicates, evaluate once
+        first_proposal = self._interpret_single(sentences[0])
+        if first_proposal.intent != ProductivityIntent.NONE:
+            return first_proposal
+        for sent in sentences[1:]:
+            p = self._interpret_single(sent)
+            if p.intent != ProductivityIntent.NONE:
+                return p
+        return ProductivityProposal(intent=ProductivityIntent.NONE)
+
+    def _interpret_single(self, raw: str) -> ProductivityProposal:
+        raw = raw.strip()
+        if not raw:
+            return ProductivityProposal(intent=ProductivityIntent.NONE)
         low = raw.lower()
-        # Reject questions/hypotheticals/conversational mentions that are not commands
         if _NEGATIVE_GUARD_RE.match(low):
             return ProductivityProposal(intent=ProductivityIntent.NONE)
 
-        # Reject if it looks like untrusted pasted excerpts / prompt injection
-        if "=== begin untrusted" in low or "ignore previous instructions" in low:
-            return ProductivityProposal(intent=ProductivityIntent.NONE)
+        # 0) Vague task / habit creation (must clarify, never fall through to LLM)
+        if _VAGUE_TASK_CREATE_RE.match(low):
+            return ProductivityProposal(intent=ProductivityIntent.TASK_CREATE, title=None)
+        if _VAGUE_HABIT_CREATE_RE.match(low):
+            return ProductivityProposal(intent=ProductivityIntent.HABIT_CREATE, title=None)
 
         # 1) HABIT UNDO COMPLETION
         m_undo = re.match(
@@ -293,10 +388,13 @@ class ProductivityIntentInterpreter:
             "habit" in low or "completed my" in low or "did my" in low or low.startswith("log ")
         ):
             target = _clean_title(m_h_done.group(1))
-            if target and not _uses_pronoun(target):
+            tq, use_ctx, ord_idx = _target_fields(target)
+            if tq or use_ctx:
                 return ProductivityProposal(
                     intent=ProductivityIntent.HABIT_COMPLETE,
-                    target_query=target,
+                    target_query=tq,
+                    uses_context_reference=use_ctx,
+                    ordinal_index=ord_idx,
                 )
 
         # 6) HABIT UPDATE
@@ -368,33 +466,36 @@ class ProductivityIntentInterpreter:
                     flags=re.IGNORECASE,
                 )
             )
-            use_ctx = _uses_pronoun(target)
+            tq, use_ctx, ord_idx = _target_fields(target)
             return ProductivityProposal(
                 intent=ProductivityIntent.TASK_COMPLETE,
-                target_query=None if use_ctx else target,
+                target_query=tq,
                 uses_context_reference=use_ctx,
+                ordinal_index=ord_idx,
                 status=TaskStatus.DONE,
             )
 
         m_t_reopen = re.match(r"^reopen\s+(?:the\s+|my\s+)?(.+?)[.!?]*$", raw, re.IGNORECASE)
         if m_t_reopen:
             target = _clean_title(m_t_reopen.group(1))
-            use_ctx = _uses_pronoun(target)
+            tq, use_ctx, ord_idx = _target_fields(target)
             return ProductivityProposal(
                 intent=ProductivityIntent.TASK_REOPEN,
-                target_query=None if use_ctx else target,
+                target_query=tq,
                 uses_context_reference=use_ctx,
+                ordinal_index=ord_idx,
                 status=TaskStatus.TODO,
             )
 
         m_t_cancel = re.match(r"^cancel\s+(?:the\s+|my\s+)?task\s+(.+?)[.!?]*$", raw, re.IGNORECASE)
         if m_t_cancel:
             target = _clean_title(m_t_cancel.group(1))
-            use_ctx = _uses_pronoun(target)
+            tq, use_ctx, ord_idx = _target_fields(target)
             return ProductivityProposal(
                 intent=ProductivityIntent.TASK_CANCEL,
-                target_query=None if use_ctx else target,
+                target_query=tq,
                 uses_context_reference=use_ctx,
+                ordinal_index=ord_idx,
                 status=TaskStatus.CANCELLED,
             )
 
@@ -406,7 +507,7 @@ class ProductivityIntentInterpreter:
         )
         if m_t_create:
             lead_pr = _PRIORITY_MAP.get((m_t_create.group(1) or "").lower())
-            body = m_t_create.group(2).strip()
+            body = m_t_create.group(2).strip().strip("\"'")
             pr, body = _extract_priority(body)
             due_expr, body = _extract_due(body)
             return ProductivityProposal(
@@ -425,11 +526,12 @@ class ProductivityIntentInterpreter:
         if m_make_pr:
             target = _clean_title(m_make_pr.group(1))
             pr = _PRIORITY_MAP.get(m_make_pr.group(2).lower())
-            use_ctx = _uses_pronoun(target)
+            tq, use_ctx, ord_idx = _target_fields(target)
             return ProductivityProposal(
                 intent=ProductivityIntent.TASK_UPDATE,
-                target_query=None if use_ctx else target,
+                target_query=tq,
                 uses_context_reference=use_ctx,
+                ordinal_index=ord_idx,
                 priority=pr,
             )
 
@@ -441,11 +543,12 @@ class ProductivityIntentInterpreter:
         if m_move:
             target = _clean_title(m_move.group(1))
             due_expr = m_move.group(2).strip()
-            use_ctx = _uses_pronoun(target)
+            tq, use_ctx, ord_idx = _target_fields(target)
             return ProductivityProposal(
                 intent=ProductivityIntent.TASK_UPDATE,
-                target_query=None if use_ctx else target,
+                target_query=tq,
                 uses_context_reference=use_ctx,
+                ordinal_index=ord_idx,
                 due_expression=due_expr,
             )
 

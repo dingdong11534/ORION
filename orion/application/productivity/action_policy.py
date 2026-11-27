@@ -15,13 +15,20 @@ from orion.application.productivity.contracts import (
 from orion.application.productivity.date_parser import parse_natural_date
 from orion.application.productivity.habit_service import HabitService
 from orion.application.productivity.ports import ClockPort, ProductivityActionStorePort
-from orion.application.productivity.productivity_context import ProductivityContextStore
+from orion.application.productivity.productivity_context import (
+    ProductivityContextPort,
+    ProductivityContextStore,
+)
 from orion.application.productivity.productivity_intent import ProductivityIntentInterpreter
 from orion.application.productivity.target_resolver import (
     resolve_habit_target,
     resolve_task_target,
 )
 from orion.application.productivity.task_service import TaskService
+from orion.application.productivity.today_query import (
+    build_today_overview,
+    format_today_chat_summary,
+)
 
 _LEVEL_3_INTENTS = {
     ProductivityIntent.TASK_ARCHIVE,
@@ -41,14 +48,14 @@ class ProductivityActionCoordinator:
         clock: ClockPort,
         action_store: ProductivityActionStorePort | None = None,
         interpreter: ProductivityIntentInterpreter | None = None,
-        context_store: ProductivityContextStore | None = None,
+        context_store: ProductivityContextPort | None = None,
     ) -> None:
         self._tasks = task_service
         self._habits = habit_service
         self._clock = clock
         self._actions = action_store
         self._interpreter = interpreter or ProductivityIntentInterpreter()
-        self._ctx = context_store or ProductivityContextStore()
+        self._ctx: ProductivityContextPort = context_store or ProductivityContextStore()
 
     def handle_message(
         self,
@@ -59,6 +66,7 @@ class ProductivityActionCoordinator:
         explicit_confirm: bool = False,
     ) -> ProductivityActionResult | None:
         """Inspect message; return ProductivityActionResult if handled, or None for normal chat."""
+        self._ctx.advance_user_turn(conversation_id)
         proposal = self._interpreter.interpret(message)
         if proposal.intent == ProductivityIntent.NONE:
             return None
@@ -95,25 +103,40 @@ class ProductivityActionCoordinator:
     ) -> ProductivityActionResult:
         intent = proposal.intent
         risk = ActionRiskLevel.LEVEL_3 if intent in _LEVEL_3_INTENTS else ActionRiskLevel.LEVEL_1
-        ctx = self._ctx.get(conversation_id)
 
         # 1) READ-ONLY QUERIES (TASK_LIST, HABIT_LIST, HABIT_STATISTICS)
         if intent == ProductivityIntent.TASK_LIST:
             bucket = proposal.task_bucket
+            if bucket == "today":
+                overview = build_today_overview(self._tasks, self._habits, self._clock)
+                summary = format_today_chat_summary(overview, self._clock.timezone)
+                shown_ids = [
+                    t.id
+                    for t in (overview.overdue + overview.due_today + overview.unscheduled)[:10]
+                ]
+                if shown_ids:
+                    self._ctx.set_last_list(conversation_id, "task", shown_ids)
+                return ProductivityActionResult(
+                    intent=intent,
+                    risk_level=ActionRiskLevel.LEVEL_1,
+                    status="executed",
+                    summary=summary,
+                )
             rows = self._tasks.list_tasks(TaskFilter(bucket=bucket))
             if not rows:
                 label = f" for {bucket}" if bucket else ""
                 summary = f"You have no active tasks{label}."
             else:
+                self._ctx.set_last_list(conversation_id, "task", [t.id for t in rows[:10]])
                 lines = []
-                for t in rows[:10]:
+                for idx, t in enumerate(rows[:10], start=1):
                     due_s = (
                         f" · Due {t.due_at.astimezone(self._clock.timezone).strftime('%a, %b %-d')}"
                         if t.due_at
                         else ""
                     )
                     lines.append(
-                        f"- [{t.priority.value.upper()}] {t.title} ({t.status.value}){due_s}"
+                        f"{idx}. [{t.priority.value.upper()}] {t.title} ({t.status.value}){due_s}"
                     )
                 header = f"Tasks ({bucket}):" if bucket else "Active tasks:"
                 summary = header + "\n" + "\n".join(lines)
@@ -133,12 +156,13 @@ class ProductivityActionCoordinator:
                     status="executed",
                     summary="You have no active habits yet.",
                 )
+            self._ctx.set_last_list(conversation_id, "habit", [h.id for h in habits[:10]])
             lines = []
-            for h in habits:
+            for idx, h in enumerate(habits, start=1):
                 st = self._habits.get_habit_statistics(h.id)
                 done_mark = "Done today" if st.completed_today else "Pending today"
                 lines.append(
-                    f"- {h.name} ({h.frequency.value}, target {h.target_count}) · Streak: {st.current_streak} · {done_mark}"
+                    f"{idx}. {h.name} ({h.frequency.value}, target {h.target_count}) · Streak: {st.current_streak} · {done_mark}"
                 )
             return ProductivityActionResult(
                 intent=intent,
@@ -215,13 +239,14 @@ class ProductivityActionCoordinator:
                 due_display = parsed_d.display_text
 
             pr = proposal.priority or TaskPriority.MEDIUM
-            task = self._tasks.create_task(
+            created_task = self._tasks.create_task(
                 title,
                 description=proposal.description,
                 priority=pr,
                 due_at=due_at,
                 due_is_date_only=due_is_date_only,
             )
+            task = self._tasks.get_task(created_task.id) or created_task
             self._ctx.set_last_entity(conversation_id, "task", task.id, task.title)
             due_part = f" Due {due_display}." if due_display else ""
             summary = f"Created task: {task.title}.{due_part} Priority: {task.priority.value.capitalize()}."
@@ -265,7 +290,8 @@ class ProductivityActionCoordinator:
                 )
             freq = proposal.frequency or HabitFrequency.DAILY
             tc = proposal.target_count or 1
-            habit = self._habits.create_habit(name, frequency=freq, target_count=tc)
+            created_habit = self._habits.create_habit(name, frequency=freq, target_count=tc)
+            habit = self._habits.get_habit(created_habit.id) or created_habit
             self._ctx.set_last_entity(conversation_id, "habit", habit.id, habit.name)
             summary = f"Created habit: {habit.name} ({habit.frequency.value}, target {habit.target_count})."
             changed = {
@@ -307,7 +333,7 @@ class ProductivityActionCoordinator:
             ProductivityIntent.TASK_ARCHIVE,
         ):
             target_id, target_label, clarify_res = self._resolve_task_or_ctx(
-                proposal, ctx.last_entity_type, ctx.last_entity_id, ctx.last_entity_label
+                conversation_id, proposal
             )
             if clarify_res is not None:
                 return clarify_res
@@ -403,6 +429,7 @@ class ProductivityActionCoordinator:
                     "due_is_date_only": before.due_is_date_only,
                 }
 
+            updated = self._tasks.get_task(updated.id) or updated
             self._ctx.set_last_entity(conversation_id, "task", updated.id, updated.title)
             aid = self._persist_action(
                 client_request_id=client_request_id,
@@ -430,9 +457,7 @@ class ProductivityActionCoordinator:
             )
 
         # 5) HABIT MUTATIONS (COMPLETE / UNDO / UPDATE / ARCHIVE)
-        target_id, target_label, clarify_res = self._resolve_habit_or_ctx(
-            proposal, ctx.last_entity_type, ctx.last_entity_id, ctx.last_entity_label
-        )
+        target_id, target_label, clarify_res = self._resolve_habit_or_ctx(conversation_id, proposal)
         if clarify_res is not None:
             return clarify_res
         assert target_id is not None and target_label is not None
@@ -689,14 +714,15 @@ class ProductivityActionCoordinator:
 
     def _resolve_task_or_ctx(
         self,
+        conversation_id: str,
         proposal: ProductivityProposal,
-        last_type: str | None,
-        last_id: str | None,
-        last_label: str | None,
     ) -> tuple[str | None, str | None, ProductivityActionResult | None]:
         if proposal.uses_context_reference:
-            if last_type == "task" and last_id:
-                t = self._tasks.get_task(last_id)
+            resolved_id = self._ctx.resolve_reference(
+                conversation_id, "task", ordinal_index=proposal.ordinal_index
+            )
+            if resolved_id:
+                t = self._tasks.get_task(resolved_id)
                 if t is not None and t.archived_at is None:
                     return t.id, t.title, None
             return (
@@ -712,6 +738,12 @@ class ProductivityActionCoordinator:
             )
         res = resolve_task_target(proposal.target_query or "", self._tasks.list_tasks())
         if res.status != TargetResolutionStatus.MATCHED or not res.matched_id:
+            if res.status == TargetResolutionStatus.AMBIGUOUS and res.candidates:
+                self._ctx.set_last_list(
+                    conversation_id,
+                    "task",
+                    [c["id"] for c in res.candidates if c.get("id")],
+                )
             return (
                 None,
                 None,
@@ -728,14 +760,15 @@ class ProductivityActionCoordinator:
 
     def _resolve_habit_or_ctx(
         self,
+        conversation_id: str,
         proposal: ProductivityProposal,
-        last_type: str | None,
-        last_id: str | None,
-        last_label: str | None,
     ) -> tuple[str | None, str | None, ProductivityActionResult | None]:
         if proposal.uses_context_reference:
-            if last_type == "habit" and last_id:
-                h = self._habits.get_habit(last_id)
+            resolved_id = self._ctx.resolve_reference(
+                conversation_id, "habit", ordinal_index=proposal.ordinal_index
+            )
+            if resolved_id:
+                h = self._habits.get_habit(resolved_id)
                 if h is not None and h.archived_at is None:
                     return h.id, h.name, None
             return (
@@ -751,6 +784,12 @@ class ProductivityActionCoordinator:
             )
         res = resolve_habit_target(proposal.target_query or "", self._habits.list_habits())
         if res.status != TargetResolutionStatus.MATCHED or not res.matched_id:
+            if res.status == TargetResolutionStatus.AMBIGUOUS and res.candidates:
+                self._ctx.set_last_list(
+                    conversation_id,
+                    "habit",
+                    [c["id"] for c in res.candidates if c.get("id")],
+                )
             return (
                 None,
                 None,

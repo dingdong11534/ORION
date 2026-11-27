@@ -576,3 +576,154 @@ class SqliteProductivityActionStore:
             "undo_payload": json.loads(row.undo_payload_json) if row.undo_payload_json else None,
             "created_at": row.created_at,
         }
+
+
+class SqliteProductivityContextStore:
+    """SQLite-persisted per-conversation productivity context (IDs only, 5-turn expiry)."""
+
+    def __init__(self, session_factory: sessionmaker) -> None:
+        self._session_factory = session_factory
+
+    def _get_or_create_row(self, session: Any, conversation_id: str) -> Any:
+        from orion.infrastructure.persistence.models import (
+            ConversationModel,
+            ConversationProductivityContextModel,
+        )
+
+        row = session.get(ConversationProductivityContextModel, conversation_id)
+        if row is not None:
+            return row
+        # Only insert if parent conversation exists (FK constraint)
+        if session.get(ConversationModel, conversation_id) is None:
+            return ConversationProductivityContextModel(
+                conversation_id=conversation_id,
+                last_list_ids_json="[]",
+                user_turn_count=0,
+            )
+        row = ConversationProductivityContextModel(
+            conversation_id=conversation_id,
+            last_list_ids_json="[]",
+            user_turn_count=0,
+            updated_at=datetime.now(UTC),
+        )
+        session.add(row)
+        session.flush()
+        return row
+
+    def get(self, conversation_id: str) -> Any:
+        from orion.application.productivity.productivity_context import (
+            ProductivityConversationContext,
+        )
+        from orion.infrastructure.persistence.models import ConversationProductivityContextModel
+
+        with self._session_factory() as session:
+            row = session.get(ConversationProductivityContextModel, conversation_id)
+            if row is None:
+                return ProductivityConversationContext()
+            last_id = (
+                row.last_task_id
+                if row.last_entity_type == "task"
+                else (row.last_habit_id if row.last_entity_type == "habit" else None)
+            )
+            return ProductivityConversationContext(
+                last_entity_type=row.last_entity_type,
+                last_entity_id=last_id,
+                last_task_id=row.last_task_id,
+                last_habit_id=row.last_habit_id,
+                last_list_ids=json.loads(row.last_list_ids_json or "[]"),
+                last_list_type=row.last_list_type,
+                user_turn_count=row.user_turn_count,
+                last_task_turn=row.last_task_turn,
+                last_habit_turn=row.last_habit_turn,
+                last_list_turn=row.last_list_turn,
+                pending_confirmation_action_id=row.pending_confirmation_action_id,
+            )
+
+    def advance_user_turn(self, conversation_id: str) -> int:
+        from orion.infrastructure.persistence.models import ConversationModel
+
+        with self._session_factory() as session, session.begin():
+            if session.get(ConversationModel, conversation_id) is None:
+                return 0
+            row = self._get_or_create_row(session, conversation_id)
+            row.user_turn_count = (row.user_turn_count or 0) + 1
+            row.updated_at = datetime.now(UTC)
+            return row.user_turn_count
+
+    def set_last_entity(
+        self, conversation_id: str, entity_type: str, entity_id: str, entity_label: str
+    ) -> None:
+        from orion.infrastructure.persistence.models import ConversationModel
+
+        with self._session_factory() as session, session.begin():
+            if session.get(ConversationModel, conversation_id) is None:
+                return
+            row = self._get_or_create_row(session, conversation_id)
+            row.last_entity_type = entity_type
+            if entity_type == "task":
+                row.last_task_id = entity_id
+                row.last_task_turn = row.user_turn_count
+            elif entity_type == "habit":
+                row.last_habit_id = entity_id
+                row.last_habit_turn = row.user_turn_count
+            row.updated_at = datetime.now(UTC)
+
+    def set_last_list(self, conversation_id: str, entity_type: str, entity_ids: list[str]) -> None:
+        from orion.application.productivity.productivity_context import MAX_LIST_IDS
+        from orion.infrastructure.persistence.models import ConversationModel
+
+        with self._session_factory() as session, session.begin():
+            if session.get(ConversationModel, conversation_id) is None:
+                return
+            row = self._get_or_create_row(session, conversation_id)
+            row.last_list_ids_json = json.dumps(list(entity_ids[:MAX_LIST_IDS]))
+            row.last_list_type = entity_type
+            row.last_list_turn = row.user_turn_count
+            row.updated_at = datetime.now(UTC)
+
+    def resolve_reference(
+        self,
+        conversation_id: str,
+        entity_type: str,
+        *,
+        ordinal_index: int | None = None,
+    ) -> str | None:
+        from orion.application.productivity.productivity_context import CONTEXT_TURN_EXPIRY
+
+        ctx = self.get(conversation_id)
+        if ordinal_index is not None:
+            if (
+                ctx.last_list_type == entity_type
+                and ctx.last_list_turn is not None
+                and (ctx.user_turn_count - ctx.last_list_turn) <= CONTEXT_TURN_EXPIRY
+                and 1 <= ordinal_index <= len(ctx.last_list_ids)
+            ):
+                return ctx.last_list_ids[ordinal_index - 1]
+            return None
+        if entity_type == "task":
+            if (
+                ctx.last_task_id
+                and ctx.last_task_turn is not None
+                and (ctx.user_turn_count - ctx.last_task_turn) <= CONTEXT_TURN_EXPIRY
+            ):
+                return ctx.last_task_id
+            return None
+        if entity_type == "habit":
+            if (
+                ctx.last_habit_id
+                and ctx.last_habit_turn is not None
+                and (ctx.user_turn_count - ctx.last_habit_turn) <= CONTEXT_TURN_EXPIRY
+            ):
+                return ctx.last_habit_id
+            return None
+        return None
+
+    def set_pending_confirmation(self, conversation_id: str, action_id: str | None) -> None:
+        from orion.infrastructure.persistence.models import ConversationModel
+
+        with self._session_factory() as session, session.begin():
+            if session.get(ConversationModel, conversation_id) is None:
+                return
+            row = self._get_or_create_row(session, conversation_id)
+            row.pending_confirmation_action_id = action_id
+            row.updated_at = datetime.now(UTC)

@@ -1452,26 +1452,24 @@ class OrionBridge(QObject):
                 )
             )
         ]
-        today_tasks = [
-            self._task_to_dict(t) for t in self._task_service.list_tasks(TaskFilter(bucket="today"))
-        ]
-        overdue_tasks = [
-            self._task_to_dict(t)
-            for t in self._task_service.list_tasks(TaskFilter(bucket="overdue"))
-        ]
-        upcoming_tasks = [
-            self._task_to_dict(t)
-            for t in self._task_service.list_tasks(TaskFilter(bucket="upcoming"))
-        ]
-        habits = []
-        for h in self._habit_service.list_habits():
-            stats = self._habit_service.get_habit_statistics(h.id)
-            habits.append(self._habit_to_dict(h, stats))
+        from orion.application.productivity.today_query import build_today_overview
+
+        overview = build_today_overview(
+            self._task_service, self._habit_service, self._task_service._clock
+        )
+        today_tasks = [self._task_to_dict(t) for t in overview.due_today]
+        overdue_tasks = [self._task_to_dict(t) for t in overview.overdue]
+        upcoming_tasks = [self._task_to_dict(t) for t in overview.upcoming]
+        unscheduled_tasks = [self._task_to_dict(t) for t in overview.unscheduled]
+        completed_today_tasks = [self._task_to_dict(t) for t in overview.completed_today]
+        habits = [self._habit_to_dict(h, st) for h, st in overview.habits]
         self.productivityDataLoaded.emit(
             {
                 "today_tasks": today_tasks,
                 "overdue_tasks": overdue_tasks,
                 "upcoming_tasks": upcoming_tasks,
+                "unscheduled_tasks": unscheduled_tasks,
+                "completed_today_tasks": completed_today_tasks,
                 "all_tasks": all_tasks,
                 "habits": habits,
             }

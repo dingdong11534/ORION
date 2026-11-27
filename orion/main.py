@@ -33,7 +33,7 @@ from orion.ui.qt_bridge import OrionBridge
 logger = logging.getLogger(__name__)
 
 # Maintained for backward compatibility with existing tests
-_EXPECTED_ALEMBIC_REVISION = "0007"
+_EXPECTED_ALEMBIC_REVISION = "0008"
 
 
 def activate_window(engine: QQmlApplicationEngine) -> None:
@@ -214,6 +214,7 @@ def main() -> int:
         from orion.infrastructure.productivity.repository import (
             SqliteHabitStore,
             SqliteProductivityActionStore,
+            SqliteProductivityContextStore,
             SqliteTaskStore,
             SystemClock,
         )
@@ -234,6 +235,7 @@ def main() -> int:
             habit_service=habit_service,
             clock=clock,
             action_store=SqliteProductivityActionStore(session_factory),
+            context_store=SqliteProductivityContextStore(session_factory),
         )
 
         assistant_service = AssistantService(
