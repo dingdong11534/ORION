@@ -1,5 +1,6 @@
-"""Offline 'Hey ORION' wake-word listener (Vosk) and explicit local speaker verifier."""
+"""Offline 'Hey ORION' / 'ORION' wake-word listener, rolling buffer, and local speaker verifier."""
 
+import io
 import json
 import logging
 import math
@@ -10,6 +11,8 @@ import struct
 import subprocess
 import threading
 import time
+import wave
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_WAKE_BOUNDARY_RE = re.compile(r"\b(?:hey\s+)?orion\b")
 
 
 def _voice_data_dir() -> Path:
@@ -30,8 +35,24 @@ def _normalize_phrase_text(text: str) -> str:
     return " ".join(cleaned.split())
 
 
+def pcm_to_wav_bytes(pcm_s16le: bytes, *, sample_rate: int = 16000, channels: int = 1) -> bytes:
+    """Wrap raw 16-bit PCM bytes into an in-memory WAV container."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm_s16le)
+    return buf.getvalue()
+
+
 class VoskWakeWordListener:
-    """Lightweight streaming 'Hey ORION' detector using PipeWire (pw-cat) + Vosk grammar."""
+    """Single-stream PipeWire (pw-cat) + Vosk wake-word detector with rolling audio buffer.
+
+    Supports both 'Hey ORION' and standalone 'ORION' anywhere in an utterance,
+    preserving pre-wake audio in a bounded in-memory ring buffer and capturing
+    post-wake speech until silence/VAD or max_command_seconds.
+    """
 
     def __init__(
         self,
@@ -39,14 +60,27 @@ class VoskWakeWordListener:
         model_dir: Path | None = None,
         phrase: str = "hey orion",
         cooldown_seconds: float = 3.0,
+        pre_roll_seconds: float = 3.5,
+        silence_timeout_seconds: float = 1.2,
+        max_command_seconds: float = 10.0,
+        vad_rms_threshold: float = 80.0,
         on_detected: Callable[[], None] | None = None,
+        on_command_captured: Callable[[bytes], None] | None = None,
         on_error: Callable[[str], None] | None = None,
     ) -> None:
         self._model_dir = model_dir or (_voice_data_dir() / "vosk" / "vosk-model-small-en-us-0.15")
         self._phrase = _normalize_phrase_text(phrase)
         self._cooldown_seconds = max(0.5, float(cooldown_seconds))
+        self._chunk_seconds = 0.125  # 4000 bytes at 16kHz s16le mono
+        self._pre_roll_chunks = max(4, int(pre_roll_seconds / self._chunk_seconds))
+        self._silence_timeout_seconds = max(0.4, float(silence_timeout_seconds))
+        self._max_command_seconds = max(2.0, float(max_command_seconds))
+        self._vad_rms_threshold = float(vad_rms_threshold)
+
         self._on_detected = on_detected
+        self._on_command_captured = on_command_captured
         self._on_error = on_error
+
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -54,8 +88,19 @@ class VoskWakeWordListener:
         self._model: Any = None
         self._running = False
         self._paused_for_ptt = False
+        self._paused_by_user = False
+        self._suppressed_for_tts = False
+
+        self._rolling_buffer: deque[bytes] = deque(maxlen=self._pre_roll_chunks)
+        self._capturing_command = False
+        self._command_chunks: list[bytes] = []
+        self._capture_started_at = 0.0
+        self._last_speech_at = 0.0
+        self._saw_post_wake_speech = False
+
         self._last_trigger_monotonic = 0.0
         self._last_wake_at = ""
+        self._last_init_at = ""
         self._current_rms = 0.0
         self._last_error = ""
         self._capture_status = "stopped"
@@ -64,11 +109,14 @@ class VoskWakeWordListener:
         self,
         *,
         on_detected: Callable[[], None] | None = None,
+        on_command_captured: Callable[[bytes], None] | None = None,
         on_error: Callable[[str], None] | None = None,
     ) -> None:
         with self._lock:
             if on_detected is not None:
                 self._on_detected = on_detected
+            if on_command_captured is not None:
+                self._on_command_captured = on_command_captured
             if on_error is not None:
                 self._on_error = on_error
 
@@ -91,11 +139,22 @@ class VoskWakeWordListener:
         with self._lock:
             return self._running
 
+    @property
+    def is_paused_by_user(self) -> bool:
+        with self._lock:
+            return self._paused_by_user
+
     def get_diagnostics(self) -> dict[str, Any]:
         with self._lock:
             thread_alive = bool(self._thread is not None and self._thread.is_alive())
-            if self._paused_for_ptt:
+            if self._paused_by_user:
+                status = "paused"
+            elif self._paused_for_ptt:
                 status = "paused_for_ptt"
+            elif self._suppressed_for_tts:
+                status = "suppressed_for_tts"
+            elif self._capturing_command:
+                status = "capturing_command"
             elif self._last_error:
                 status = "error"
             elif self._running and thread_alive:
@@ -118,12 +177,18 @@ class VoskWakeWordListener:
                 "model_status": model_status,
                 "model_path": str(self._model_dir),
                 "thread_alive": thread_alive,
+                "command_capturing": self._capturing_command,
+                "paused_by_user": self._paused_by_user,
                 "last_wake_at": self._last_wake_at,
+                "last_init_at": self._last_init_at,
                 "last_error": self._last_error,
             }
 
     def start(self) -> None:
         with self._lock:
+            if self._paused_by_user:
+                self._capture_status = "paused"
+                return
             if self._running:
                 return
             if not self.is_available():
@@ -146,7 +211,10 @@ class VoskWakeWordListener:
             proc = self._proc
             thread = self._thread
             self._running = False
-            self._capture_status = "stopped"
+            self._capturing_command = False
+            self._command_chunks.clear()
+            self._rolling_buffer.clear()
+            self._capture_status = "paused" if self._paused_by_user else "stopped"
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -159,6 +227,19 @@ class VoskWakeWordListener:
             self._proc = None
             self._thread = None
 
+    def pause_by_user(self) -> None:
+        """Explicit user pause: stops microphone capture and never silently reactivates."""
+        with self._lock:
+            self._paused_by_user = True
+        self.stop()
+
+    def resume_by_user(self) -> None:
+        """Explicit user resume: clears paused state and restarts microphone capture."""
+        with self._lock:
+            self._paused_by_user = False
+        if self.is_available():
+            self.start()
+
     def pause_for_ptt(self) -> None:
         """Release microphone cleanly while push-to-talk is recording."""
         with self._lock:
@@ -166,11 +247,19 @@ class VoskWakeWordListener:
         self.stop()
 
     def resume_after_ptt(self) -> None:
-        """Resume wake-word listening after push-to-talk finishes."""
+        """Resume wake-word listening after push-to-talk finishes (unless user paused)."""
         with self._lock:
             self._paused_for_ptt = False
-        if self.is_available():
+            paused_user = self._paused_by_user
+        if not paused_user and self.is_available():
             self.start()
+
+    def suppress_wake_for_playback(self, suppressed: bool) -> None:
+        """Prevent ORION's spoken TTS playback from triggering wake detection."""
+        with self._lock:
+            self._suppressed_for_tts = bool(suppressed)
+            if suppressed:
+                self._rolling_buffer.clear()
 
     def _build_capture_cmd(self) -> list[str]:
         if shutil.which("pw-cat"):
@@ -196,12 +285,16 @@ class VoskWakeWordListener:
         vosk.SetLogLevel(-1)
         if self._model is None:
             self._model = vosk.Model(str(self._model_dir))
-        grammar = json.dumps([self._phrase, "[unk]"])
+        phrases = list({self._phrase, "orion", "[unk]"})
+        grammar = json.dumps(phrases)
         return vosk.KaldiRecognizer(self._model, 16000, grammar)
 
     def matches_phrase(self, text: str) -> bool:
+        """Word-boundary-aware match for 'Hey ORION' or standalone 'ORION'."""
         normalized = _normalize_phrase_text(text)
-        return bool(self._phrase) and self._phrase in normalized
+        if not normalized:
+            return False
+        return bool(_WAKE_BOUNDARY_RE.search(normalized))
 
     def _measure_pcm_rms(self, data: bytes) -> float:
         count = len(data) // 2
@@ -210,23 +303,83 @@ class VoskWakeWordListener:
         samples = struct.unpack(f"<{count}h", data[: count * 2])
         return math.sqrt(sum(s * s for s in samples) / count)
 
-    def _maybe_trigger_wake(self, rec: Any) -> bool:
-        now = time.monotonic()
-        if (now - self._last_trigger_monotonic) < self._cooldown_seconds:
-            return False
-        self._last_trigger_monotonic = now
-        self._last_wake_at = datetime.now(UTC).isoformat()
+    def _begin_command_capture(self, rec: Any, now: float) -> bool:
+        with self._lock:
+            if self._capturing_command:
+                return False
+            if (now - self._last_trigger_monotonic) < self._cooldown_seconds:
+                return False
+            self._last_trigger_monotonic = now
+            self._last_wake_at = datetime.now(UTC).isoformat()
+            self._capturing_command = True
+            self._command_chunks = list(self._rolling_buffer)
+            self._rolling_buffer.clear()
+            self._capture_started_at = now
+            self._last_speech_at = now
+            self._saw_post_wake_speech = False
+            cb = self._on_detected
+
         rec.Reset()
-        cb = self._on_detected
         if cb is not None:
             cb()
         return True
 
-    def process_audio_chunk(self, rec: Any, data: bytes) -> bool:
-        """Feed one raw 16kHz s16le PCM chunk into Vosk and trigger if phrase matches."""
+    def _finish_command_capture(self, rec: Any) -> bytes | None:
+        with self._lock:
+            if not self._capturing_command:
+                return None
+            pcm_bytes = b"".join(self._command_chunks)
+            self._command_chunks.clear()
+            self._capturing_command = False
+            cb = self._on_command_captured
+
+        rec.Reset()
+        if cb is not None and pcm_bytes:
+            cb(pcm_bytes)
+        return pcm_bytes
+
+    def process_audio_chunk(
+        self,
+        rec: Any,
+        data: bytes,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Process one 16kHz s16le PCM chunk: rolling buffer, wake detection, or command VAD."""
+        cur_time = time.monotonic() if now is None else now
         rms = self._measure_pcm_rms(data)
+
         with self._lock:
             self._current_rms = rms
+            if self._suppressed_for_tts or self._paused_by_user:
+                return False
+            capturing = self._capturing_command
+
+        if capturing:
+            with self._lock:
+                self._command_chunks.append(data)
+                if rms >= self._vad_rms_threshold:
+                    self._last_speech_at = cur_time
+                    self._saw_post_wake_speech = True
+                elapsed = cur_time - self._capture_started_at
+                silence_elapsed = cur_time - self._last_speech_at
+                should_finish = (
+                    elapsed >= self._max_command_seconds
+                    or (
+                        self._saw_post_wake_speech
+                        and silence_elapsed >= self._silence_timeout_seconds
+                    )
+                    or (
+                        not self._saw_post_wake_speech
+                        and silence_elapsed >= max(1.8, self._silence_timeout_seconds)
+                    )
+                )
+            if should_finish:
+                self._finish_command_capture(rec)
+            return False
+
+        with self._lock:
+            self._rolling_buffer.append(data)
 
         matched = False
         if rec.AcceptWaveform(data):
@@ -237,13 +390,12 @@ class VoskWakeWordListener:
             matched = self.matches_phrase(part.get("partial", ""))
 
         if matched:
-            return self._maybe_trigger_wake(rec)
+            return self._begin_command_capture(rec, cur_time)
         return False
 
     def test_microphone_rms(self, duration_seconds: float = 0.5) -> float:
         """Capture a short raw PCM sample to verify microphone input and return RMS."""
-        was_running = self.is_running
-        if was_running:
+        if self.is_running:
             return self.get_diagnostics()["current_rms"]
         cmd = self._build_capture_cmd()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -275,6 +427,7 @@ class VoskWakeWordListener:
             with self._lock:
                 self._proc = proc
                 self._capture_status = "listening"
+                self._last_init_at = datetime.now(UTC).isoformat()
 
             assert proc.stdout is not None
             chunk_bytes = 4000  # ~125 ms at 16kHz s16le mono
@@ -306,8 +459,10 @@ class VoskWakeWordListener:
                 proc = self._proc
                 self._proc = None
                 self._running = False
+                self._capturing_command = False
+                self._command_chunks.clear()
                 if self._capture_status == "listening":
-                    self._capture_status = "stopped"
+                    self._capture_status = "paused" if self._paused_by_user else "stopped"
             if proc is not None and proc.poll() is None:
                 proc.terminate()
                 try:

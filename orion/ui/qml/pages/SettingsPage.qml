@@ -389,18 +389,52 @@ Rectangle {
                                 objectName: "wakeDiagnosticsText"
                                 Layout.fillWidth: true
                                 text: "Input: " + (diagCol.diag.input_source || "none")
-                                    + " · Status: " + (diagCol.diag.capture_status || "unknown")
+                                    + " · Capture: " + (diagCol.diag.capture_status || "unknown")
+                                    + " · State: " + (diagCol.diag.command_state || "unknown")
                                     + " · Format: " + (diagCol.diag.sample_rate || 16000) + " Hz, " + (diagCol.diag.channels || 1) + " ch"
                                     + "\nRMS Level: " + (diagCol.diag.current_rms || 0)
-                                    + " · Vosk Model: " + (diagCol.diag.model_status || "missing")
-                                    + " · Thread Alive: " + (diagCol.diag.thread_alive ? "yes" : "no")
+                                    + " · Vosk: " + (diagCol.diag.model_status || "missing")
+                                    + " · Whisper: " + (diagCol.diag.whisper_available ? "ready" : "missing")
+                                    + " · Piper: " + (diagCol.diag.piper_available ? "ready" : "missing")
+                                    + " · Thread: " + (diagCol.diag.thread_alive ? "yes" : "no")
+                                    + (diagCol.diag.last_init_at ? ("\nLast Init: " + diagCol.diag.last_init_at) : "")
                                     + (diagCol.diag.last_wake_at ? ("\nLast Wake: " + diagCol.diag.last_wake_at) : "")
+                                    + (diagCol.diag.last_transcript ? ("\nLast Transcript: " + diagCol.diag.last_transcript) : "")
                                     + (diagCol.diag.last_error ? ("\nError: " + diagCol.diag.last_error) : "")
                                 font.family: Theme.fontFamily
                                 font.pixelSize: Theme.fontCaption
                                 color: Theme.textSecondary
                                 wrapMode: Text.Wrap
                                 textFormat: Text.PlainText
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spaceXs
+                                OrionButton {
+                                    text: root.micIndicatorState === "paused" ? "Resume Listening" : "Pause Listening"
+                                    variant: "secondary"
+                                    compact: true
+                                    onClicked: if (typeof orion !== "undefined" && orion !== null) orion.toggleVoiceListening()
+                                }
+                                OrionButton {
+                                    text: "Retry Init"
+                                    variant: "quiet"
+                                    compact: true
+                                    onClicked: if (typeof orion !== "undefined" && orion !== null) orion.retryVoiceMicrophone()
+                                }
+                                OrionButton {
+                                    text: "Test Wake"
+                                    variant: "quiet"
+                                    compact: true
+                                    onClicked: if (typeof orion !== "undefined" && orion !== null) orion.testWakeDetection()
+                                }
+                                OrionButton {
+                                    text: "Test Speech"
+                                    variant: "quiet"
+                                    compact: true
+                                    onClicked: if (typeof orion !== "undefined" && orion !== null) orion.testSpokenResponse()
+                                }
                             }
 
                             ProgressBar {

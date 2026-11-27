@@ -293,6 +293,19 @@ Item {
             root.activateOrbFromWakeWord()
         }
 
+        function onVoiceNavigationRequested(intentKind) {
+            if (intentKind === "minimize_to_orb") {
+                root.minimizeToOrbFromVoice()
+                return
+            }
+            if (intentKind === "open_home") root.activePage = "home"
+            else if (intentKind === "open_chat") root.activePage = "chat"
+            else if (intentKind === "open_knowledge") root.activePage = "knowledge"
+            else if (intentKind === "open_workspace") root.activePage = "workspace"
+            else if (intentKind === "open_productivity") root.activePage = "productivity"
+            root.restoreMainWindowFromVoice()
+        }
+
         function onApprovalRequested(requestDict) {
             pendingApprovalsModel.append(requestDict)
             root.approvalRemainingSeconds = 60

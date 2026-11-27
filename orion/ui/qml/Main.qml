@@ -29,6 +29,11 @@ ApplicationWindow {
     readonly property string supportedKnowledgeFormats: (typeof orion !== "undefined" && orion !== null) ? orion.supportedKnowledgeFormats : ""
     readonly property string sessionState: (typeof orion !== "undefined" && orion !== null) ? orion.sessionState : "locked"
     readonly property bool backgroundMode: (typeof orion !== "undefined" && orion !== null) ? orion.backgroundMode : false
+    readonly property string micIndicatorState: (typeof orion !== "undefined" && orion !== null) ? orion.micIndicatorState : "wake_listening"
+    readonly property string micStatusText: (typeof orion !== "undefined" && orion !== null) ? orion.micStatusText : "Microphone active — local wake-word monitoring. No continuous audio is saved."
+    readonly property string lastVoiceCommand: (typeof orion !== "undefined" && orion !== null) ? orion.lastVoiceCommand : ""
+    readonly property string lastVoiceResponse: (typeof orion !== "undefined" && orion !== null) ? orion.lastVoiceResponse : ""
+    readonly property bool ttsMuted: (typeof orion !== "undefined" && orion !== null) ? orion.ttsMuted : false
     readonly property int maxThinkingChars: 32768
 
     property string activePage: "home" // "home" | "chat" | "knowledge" | "workspace" | "productivity" | "settings"
@@ -182,6 +187,41 @@ ApplicationWindow {
     function focusComposer() { chatPage.composerField.forceActiveFocus() }
     function insertTranscriptIntoComposer(text) { chatPage.insertTranscript(text) }
     function openKnowledgePage() { root.activePage = "knowledge" }
+    function restoreMainWindowFromVoice() {
+        root.orbExpanded = false
+        root.orbForceVisible = false
+        root.orbHidden = false
+        if (typeof orion !== "undefined" && orion !== null)
+            orion.setBackgroundMode(false)
+        root.show()
+        root.raise()
+        root.requestActivate()
+    }
+    function minimizeToOrbFromVoice() {
+        root.orbHidden = false
+        root.orbExpanded = false
+        root.orbForceVisible = false
+        if (typeof orion !== "undefined" && orion !== null) {
+            orion.loadBackgroundJobs()
+            orion.setBackgroundMode(true)
+        }
+    }
+    function micColorForState(st) {
+        if (st === "command_capture") return Theme.danger
+        if (st === "processing") return Theme.warning
+        if (st === "speaking") return Theme.habit3
+        if (st === "paused") return Theme.textSecondary
+        if (st === "error") return Theme.danger
+        return Theme.accent
+    }
+    function micShortBadge(st) {
+        if (st === "command_capture") return "REC"
+        if (st === "processing") return "PROC"
+        if (st === "speaking") return "SPEAK"
+        if (st === "paused") return "PAUSED"
+        if (st === "error") return "ERR"
+        return "MIC"
+    }
     function activateOrbFromWakeWord() {
         root.orbHidden = false
         root.orbForceVisible = true
@@ -429,18 +469,85 @@ ApplicationWindow {
             }
         }
 
-        // Main Content Stack
-        StackLayout {
+        // Main Content Column with Persistent Microphone Visibility Bar
+        ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: ["home", "chat", "knowledge", "workspace", "productivity", "settings"].indexOf(root.activePage)
+            spacing: 0
 
-            HomePage { root: root }
-            ChatPage { id: chatPage; root: root; chatModel: chatModel; conversationsModel: conversationsModel; knowledgeSourcesModel: knowledgeSourcesModel }
-            KnowledgePage { objectName: "knowledgePanel"; root: root; theme: Theme; knowledgeSourcesModel: knowledgeSourcesModel }
-            WorkspacePage { objectName: "workspaceBrowserPanel"; root: root; theme: Theme; workspaceEntriesModel: workspaceEntriesModel }
-            ProductivityPage { root: root }
-            SettingsPage { root: root }
+            Rectangle {
+                id: persistentMicBar
+                objectName: "persistentMicBar"
+                Layout.fillWidth: true
+                Layout.preferredHeight: 36
+                color: Theme.sidebar
+                border.width: 1
+                border.color: Theme.hairline
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Theme.spaceMd
+                    anchors.rightMargin: Theme.spaceMd
+                    spacing: Theme.spaceSm
+
+                    Rectangle {
+                        objectName: "headerMicIndicatorDot"
+                        width: 10
+                        height: 10
+                        radius: 5
+                        color: root.micColorForState(root.micIndicatorState)
+                    }
+
+                    Text {
+                        objectName: "headerMicStatusText"
+                        Layout.fillWidth: true
+                        text: root.micStatusText
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.fontCaption
+                        color: root.micIndicatorState === "error" ? Theme.danger : Theme.textSecondary
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                    }
+
+                    OrionButton {
+                        objectName: "headerMicRetryButton"
+                        visible: root.micIndicatorState === "error"
+                        compact: true
+                        variant: "secondary"
+                        text: "Retry"
+                        onClicked: if (typeof orion !== "undefined" && orion !== null) orion.retryVoiceMicrophone()
+                    }
+
+                    OrionButton {
+                        objectName: "headerMicToggleButton"
+                        compact: true
+                        variant: root.micIndicatorState === "paused" ? "primary" : "quiet"
+                        text: root.micIndicatorState === "paused" ? "Resume Mic" : "Pause Mic"
+                        onClicked: if (typeof orion !== "undefined" && orion !== null) orion.toggleVoiceListening()
+                    }
+
+                    OrionButton {
+                        objectName: "headerTtsMuteButton"
+                        compact: true
+                        variant: "quiet"
+                        text: root.ttsMuted ? "Unmute" : "Mute"
+                        onClicked: if (typeof orion !== "undefined" && orion !== null) orion.setTtsMuted(!root.ttsMuted)
+                    }
+                }
+            }
+
+            StackLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: ["home", "chat", "knowledge", "workspace", "productivity", "settings"].indexOf(root.activePage)
+
+                HomePage { root: root }
+                ChatPage { id: chatPage; root: root; chatModel: chatModel; conversationsModel: conversationsModel; knowledgeSourcesModel: knowledgeSourcesModel }
+                KnowledgePage { objectName: "knowledgePanel"; root: root; theme: Theme; knowledgeSourcesModel: knowledgeSourcesModel }
+                WorkspacePage { objectName: "workspaceBrowserPanel"; root: root; theme: Theme; workspaceEntriesModel: workspaceEntriesModel }
+                ProductivityPage { root: root }
+                SettingsPage { root: root }
+            }
         }
     }
 
@@ -492,8 +599,8 @@ ApplicationWindow {
         objectName: "orionOrbWindow"
         transientParent: null
         visible: (root.backgroundMode || root.orbForceVisible) && !root.orbHidden
-        width: root.orbExpanded ? 300 : 72
-        height: root.orbExpanded ? 280 : 72
+        width: root.orbExpanded ? 320 : 80
+        height: root.orbExpanded ? 340 : 80
         flags: Qt.FramelessWindowHint | Qt.Window | Qt.WindowStaysOnTopHint
         color: "transparent"
         title: "ORION Orb"
@@ -501,16 +608,16 @@ ApplicationWindow {
             orionOrbWindow.transientParent = null
         }
 
-        // Collapsed 72x72 circular Orb
+        // Collapsed 80x80 circular Orb with persistent microphone indicator ring
         Rectangle {
             id: collapsedOrbBody
             objectName: "collapsedOrbBody"
             visible: !root.orbExpanded
             anchors.fill: parent
-            radius: 36
+            radius: 40
             color: root.sessionState === "unlocked" ? Theme.accent : Theme.surface
-            border.width: 2
-            border.color: root.sessionState === "unlocked" ? Theme.onAccent : Theme.border
+            border.width: 4
+            border.color: root.micColorForState(root.micIndicatorState)
 
             Column {
                 anchors.centerIn: parent
@@ -519,25 +626,38 @@ ApplicationWindow {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: root.sessionState === "unlocked" ? "ORION" : "LOCKED"
                     font.family: Theme.fontFamily
-                    font.pixelSize: 11
+                    font.pixelSize: 10
                     font.weight: Font.DemiBold
                     color: root.sessionState === "unlocked" ? Theme.onAccent : Theme.text
                     textFormat: Text.PlainText
                 }
-                Text {
+                Rectangle {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    visible: root.backgroundJobs.length > 0
-                    text: root.backgroundJobs.length + " job" + (root.backgroundJobs.length === 1 ? "" : "s")
-                    font.family: Theme.fontFamily
-                    font.pixelSize: 9
-                    color: root.sessionState === "unlocked" ? Theme.onAccent : Theme.textSecondary
-                    textFormat: Text.PlainText
+                    width: 46
+                    height: 16
+                    radius: 8
+                    color: root.micColorForState(root.micIndicatorState)
+                    Text {
+                        objectName: "orbCollapsedMicBadge"
+                        anchors.centerIn: parent
+                        text: root.micShortBadge(root.micIndicatorState)
+                        font.family: Theme.fontFamily
+                        font.pixelSize: 9
+                        font.weight: Font.DemiBold
+                        color: "#FFFFFF"
+                        textFormat: Text.PlainText
+                    }
                 }
             }
 
+            ToolTip.visible: orbMouseArea.containsMouse
+            ToolTip.text: root.micStatusText
+
             MouseArea {
+                id: orbMouseArea
                 objectName: "orbMouseArea"
                 anchors.fill: parent
+                hoverEnabled: true
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 cursorShape: Qt.PointingHandCursor
                 property point pressPos: Qt.point(0, 0)
@@ -669,22 +789,47 @@ ApplicationWindow {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Mic: " + ((typeof orion !== "undefined" && orion !== null) ? orion.voiceState : "idle")
-                        + " · Jobs: " + root.backgroundJobs.length
+                    text: root.micStatusText + " · Jobs: " + root.backgroundJobs.length
                     font.family: Theme.fontFamily
                     font.pixelSize: Theme.fontCaption
                     color: Theme.textSecondary
+                    wrapMode: Text.Wrap
                     textFormat: Text.PlainText
                 }
 
-                Text {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: (typeof orion !== "undefined" && orion !== null)
-                        ? (orion.wakeWordStatus + "\n" + orion.speakerVerificationStatus)
-                        : ""
+                    spacing: Theme.spaceXs
+                    OrionButton {
+                        objectName: "orbPauseMicButton"
+                        Layout.fillWidth: true
+                        compact: true
+                        variant: root.micIndicatorState === "paused" ? "primary" : "secondary"
+                        text: root.micIndicatorState === "paused" ? "Resume Mic" : "Pause Mic"
+                        onClicked: if (typeof orion !== "undefined" && orion !== null) orion.toggleVoiceListening()
+                    }
+                    OrionButton {
+                        objectName: "orbDiagnosticsButton"
+                        compact: true
+                        variant: "quiet"
+                        text: "Diag"
+                        onClicked: {
+                            root.activePage = "settings"
+                            root.restoreMainWindowFromVoice()
+                        }
+                    }
+                }
+
+                Text {
+                    visible: root.lastVoiceCommand.length > 0 || root.lastVoiceResponse.length > 0
+                    Layout.fillWidth: true
+                    text: (root.lastVoiceCommand ? ("You: " + root.lastVoiceCommand + "\n") : "")
+                        + (root.lastVoiceResponse ? ("ORION: " + root.lastVoiceResponse) : "")
                     font.family: Theme.fontFamily
-                    font.pixelSize: 10
-                    color: Theme.textSecondary
+                    font.pixelSize: 11
+                    color: Theme.text
+                    maximumLineCount: 4
+                    elide: Text.ElideRight
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
                 }
