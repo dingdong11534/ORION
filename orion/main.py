@@ -238,14 +238,6 @@ def main() -> int:
             context_store=SqliteProductivityContextStore(session_factory),
         )
 
-        assistant_service = AssistantService(
-            model_provider=model_provider,
-            conversation_store=conversation_store,
-            settings_store=settings_store,
-            retrieval_service=retrieval_service,
-            productivity_coordinator=productivity_coordinator,
-        )
-
         # 7b. Construct offline voice service (lazy model loading + idle unload)
         from orion.application.voice.heavy_work_gate import HeavyWorkGate
         from orion.application.voice.voice_service import VoiceService
@@ -259,6 +251,28 @@ def main() -> int:
             audio_in=PipeWireAudioInput(),
             audio_out=PipeWireAudioOutput(),
             gate=HeavyWorkGate(),
+        )
+
+        from orion.application.identity.capabilities import CapabilityRegistry
+        from orion.application.identity.identity_service import OrionIdentityService
+
+        capability_registry = CapabilityRegistry(
+            model_provider=model_provider,
+            knowledge_service=knowledge_service,
+            workspace_enabled=True,
+            task_service=task_service,
+            habit_service=habit_service,
+            voice_service=voice_service,
+        )
+        identity_service = OrionIdentityService(capability_registry)
+
+        assistant_service = AssistantService(
+            model_provider=model_provider,
+            conversation_store=conversation_store,
+            settings_store=settings_store,
+            retrieval_service=retrieval_service,
+            productivity_coordinator=productivity_coordinator,
+            identity_service=identity_service,
         )
 
         # 8. Construct OrionBridge & coordinate graceful lifecycle

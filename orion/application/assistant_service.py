@@ -57,12 +57,14 @@ class AssistantService:
         max_history_chars: int = 2400,
         retrieval_service: DocumentRetrievalService | None = None,
         productivity_coordinator: Any = None,
+        identity_service: Any = None,
     ) -> None:
         self._model_provider = model_provider
         self._conversation_store = conversation_store
         self._settings_store = settings_store
         self._retrieval_service = retrieval_service
         self._productivity_coordinator = productivity_coordinator
+        self._identity_service = identity_service
         self._query_resolver = KnowledgeQueryContextResolver()
         if max_history_messages is None:
             env_limit = os.environ.get("ORION_MAX_HISTORY_MESSAGES", "12").strip()
@@ -692,6 +694,22 @@ class AssistantService:
         try:
             # Snapshot thinking preference at request start so mid-request toggles never alter it
             snapshot_think = self.get_show_thinking() and self.supports_thinking()
+
+            # C1. Trusted ORION identity and live capability reporting (never via RAG)
+            if self._identity_service is not None and (
+                self._identity_service.is_identity_or_capability_query(req.content)
+            ):
+                id_reply = self._identity_service.answer(req.content)
+                accumulated_chunks.append(id_reply)
+                if on_chunk is not None:
+                    on_chunk(id_reply)
+                yield id_reply
+                self._conversation_store.complete_request(
+                    conversation_id=cid,
+                    client_request_id=req.client_request_id,
+                    response_content=id_reply,
+                )
+                return
 
             # C2. Constrained natural-language productivity action check (only on user message)
             if self._productivity_coordinator is not None:
