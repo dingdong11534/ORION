@@ -165,6 +165,34 @@ ApplicationWindow {
     function focusComposer() { chatPage.composerField.forceActiveFocus() }
     function insertTranscriptIntoComposer(text) { chatPage.insertTranscript(text) }
     function openKnowledgePage() { root.activePage = "knowledge" }
+    function startAskKnowledge(promptText, docIds) {
+        const ids = docIds ? docIds.slice() : []
+        root.selectedKnowledgeIds = ids
+        if (typeof orion !== "undefined" && orion !== null) {
+            orion.setConversationSelectedSources(ids)
+            orion.setKnowledgeMode(ids.length > 0 ? "selected_sources" : "ask_knowledge")
+        }
+        root.activePage = "chat"
+        if (promptText && promptText.length > 0) {
+            chatPage.composerField.text = promptText
+        }
+        chatPage.composerField.forceActiveFocus()
+    }
+    function startSelectedSourcesChat() { startAskKnowledge("", root.selectedKnowledgeIds) }
+    function clearKnowledgeScope() {
+        root.selectedKnowledgeIds = []
+        if (typeof orion !== "undefined" && orion !== null) {
+            orion.setConversationSelectedSources([])
+            orion.setKnowledgeMode("chat")
+        }
+    }
+    function openReferenceModal(refObj) {
+        if (!refObj) return
+        root.inspectorDocId = refObj.document_id || ""
+        root.inspectorChunkIndex = refObj.chunk_index || 0
+        root.inspectorText = refObj.content || refObj.excerpt || ""
+        sourceInspectorModal.open()
+    }
     function confirmDeleteConversation(convId, convTitle) { root.pendingDeleteId = convId; root.pendingDeleteTitle = convTitle; deleteDialog.open() }
     function openDeleteConfirmation(convId, convTitle) { confirmDeleteConversation(convId, convTitle) }
     function openRenameDialog(convId, convTitle) { root.pendingRenameId = convId; renameInput.text = convTitle; renameDialog.open() }
