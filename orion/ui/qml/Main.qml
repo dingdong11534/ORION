@@ -29,7 +29,7 @@ ApplicationWindow {
     readonly property string supportedKnowledgeFormats: (typeof orion !== "undefined" && orion !== null) ? orion.supportedKnowledgeFormats : ""
     readonly property int maxThinkingChars: 32768
 
-    property string activePage: "chat" // "chat" | "knowledge" | "workspace" | "productivity" | "settings"
+    property string activePage: "home" // "home" | "chat" | "knowledge" | "workspace" | "productivity" | "settings"
     property bool workspacePanelOpen: false
     onWorkspacePanelOpenChanged: { if (workspacePanelOpen && activePage !== "workspace") activePage = "workspace" }
     property string activeConversationId: ""
@@ -59,6 +59,7 @@ ApplicationWindow {
     property var prodHabits: []
     property var memoryProfile: ({ preferred_name: "", timezone: "Asia/Kolkata" })
     property var personalMemories: []
+    property var homeDashboard: ({})
     property string productivityError: ""
     property string voiceErrorMessage: ""
     property string pendingDeleteId: ""
@@ -120,7 +121,10 @@ ApplicationWindow {
             root.activeConversationId = orion.activeConversationId
             orion.loadInitialState()
             if (orion.knowledgeAvailable) orion.loadKnowledgeSources()
-            if (orion.productivityAvailable) orion.loadProductivityData("", "", "", "priority_due")
+            if (orion.productivityAvailable) {
+                orion.loadProductivityData("", "", "", "priority_due")
+                orion.loadHomeDashboard()
+            }
         }
     }
 
@@ -242,6 +246,15 @@ ApplicationWindow {
                 }
 
                 OrionListRow {
+                    objectName: "navHomeButton"
+                    Layout.fillWidth: true
+                    title: parent.parent.compactRail ? "H" : "Home"
+                    selected: root.activePage === "home"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Home"
+                    onClicked: root.activePage = "home"
+                }
+                OrionListRow {
                     objectName: "navChatButton"
                     Layout.fillWidth: true
                     title: parent.parent.compactRail ? "C" : "Chat"
@@ -324,8 +337,9 @@ ApplicationWindow {
         StackLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: ["chat", "knowledge", "workspace", "productivity", "settings"].indexOf(root.activePage)
+            currentIndex: ["home", "chat", "knowledge", "workspace", "productivity", "settings"].indexOf(root.activePage)
 
+            HomePage { root: root }
             ChatPage { id: chatPage; root: root; chatModel: chatModel; conversationsModel: conversationsModel }
             KnowledgePage { objectName: "knowledgePanel"; root: root; theme: Theme; knowledgeSourcesModel: knowledgeSourcesModel }
             WorkspacePage { objectName: "workspaceBrowserPanel"; root: root; theme: Theme; workspaceEntriesModel: workspaceEntriesModel }

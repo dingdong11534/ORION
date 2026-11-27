@@ -176,6 +176,7 @@ class OrionBridge(QObject):
     voiceTranscriptReady = Signal(str)
     voiceError = Signal(str, str)
     memoryDataLoaded = Signal(dict)
+    homeDashboardLoaded = Signal(dict)
 
     def __init__(
         self,
@@ -192,6 +193,7 @@ class OrionBridge(QObject):
         productivity_coordinator: ProductivityActionCoordinator | None = None,
         voice_service: Any = None,
         memory_service: Any = None,
+        session_factory: Any = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
@@ -217,6 +219,7 @@ class OrionBridge(QObject):
         self._task_service: TaskService | None = task_service
         self._voice_service: Any = voice_service
         self._memory_service: Any = memory_service
+        self._session_factory: Any = session_factory
         self._voice_state: str = "idle"
         self._theme_mode: str = "light"
         if getattr(self._service, "_settings_store", None) is not None:
@@ -2063,3 +2066,28 @@ class OrionBridge(QObject):
             return
         self._memory_service.delete_memory(memory_id)
         self.loadPersonalMemory()
+
+    # ------------------------------------------------------------------
+    # Home Dashboard (Milestone 4.12 Phase E)
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def loadHomeDashboard(self) -> None:
+        if (
+            self._task_service is None
+            or self._habit_service is None
+            or self._session_factory is None
+        ):
+            return
+        from orion.application.productivity.home_dashboard_query import build_home_dashboard
+
+        data = build_home_dashboard(
+            task_service=self._task_service,
+            habit_service=self._habit_service,
+            clock=self._task_service._clock,
+            session_factory=self._session_factory,
+            conversation_store=self._service._conversation_store,
+            knowledge_service=self._knowledge_service,
+            memory_service=self._memory_service,
+        )
+        self.homeDashboardLoaded.emit(data)

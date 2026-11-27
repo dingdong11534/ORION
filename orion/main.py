@@ -268,6 +268,7 @@ def main() -> int:
             habit_service=habit_service,
             voice_service=voice_service,
             memory_service=memory_service,
+            session_factory=session_factory,
         )
         identity_service = OrionIdentityService(capability_registry)
 
@@ -290,6 +291,7 @@ def main() -> int:
             productivity_coordinator=productivity_coordinator,
             voice_service=voice_service,
             memory_service=memory_service,
+            session_factory=session_factory,
         )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,

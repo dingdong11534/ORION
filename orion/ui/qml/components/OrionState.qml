@@ -281,6 +281,10 @@ Item {
             root.personalMemories = payload.memories || []
         }
 
+        function onHomeDashboardLoaded(payload) {
+            root.homeDashboard = payload || ({})
+        }
+
         function onApprovalRequested(requestDict) {
             pendingApprovalsModel.append(requestDict)
             root.approvalRemainingSeconds = 60
