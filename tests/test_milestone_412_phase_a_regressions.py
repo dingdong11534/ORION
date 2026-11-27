@@ -91,7 +91,6 @@ def test_repro_3_2_sentence_splitting_before_extraction():
     assert p.target_query == "reading"
 
 
-@pytest.mark.xfail(strict=True, reason="3.3: Main.qml calls nonexistent orion.newConversation()")
 def test_repro_3_3_main_qml_calls_valid_new_conversation_slot():
     qml = Path("orion/ui/qml/Main.qml").read_text(encoding="utf-8")
     assert "orion.newConversation()" not in qml

@@ -309,6 +309,19 @@ class AssistantService:
 
         return conv
 
+    def rename_conversation(self, conversation_id: str, new_title: str) -> ConversationSummary:
+        """Rename a conversation and mark its title as user-customized."""
+        if not hasattr(self._conversation_store, "rename_conversation"):
+            raise AssistantServiceError("Conversation renaming is not supported by this store.")
+        try:
+            return self._conversation_store.rename_conversation(conversation_id, new_title)
+        except ConversationNotFoundError:
+            raise
+        except Exception as exc:
+            raise AssistantServiceError(
+                f"Failed to rename conversation {conversation_id!r}: {exc}"
+            ) from exc
+
     def delete_conversation(self, conversation_id: str) -> None:
         """Delete a conversation.
 

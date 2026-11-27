@@ -48,6 +48,7 @@ from orion.application.contracts import (
     PersistedMessage,
     RequestRecord,
     RequestStartResult,
+    derive_conversation_title,
 )
 from orion.application.ports import (
     ConversationNotFoundError,
@@ -109,6 +110,7 @@ def _conv_to_summary(c: ConversationModel) -> ConversationSummary:
     return ConversationSummary(
         id=c.id,
         title=c.title,
+        title_is_custom=bool(getattr(c, "title_is_custom", False)),
         created_at=c.created_at,
         updated_at=c.updated_at,
         knowledge_scope=c.knowledge_scope or "none",
@@ -317,6 +319,26 @@ class SqliteConversationStore:
 
         return _with_busy_retry(_run)
 
+    def rename_conversation(self, conversation_id: str, new_title: str) -> ConversationSummary:
+        """Explicitly rename a conversation and lock it against auto-titling."""
+        clean = " ".join((new_title or "").split()).strip()
+        if not clean:
+            raise ValueError("Conversation title cannot be blank.")
+
+        def _run() -> ConversationSummary:
+            with self._factory() as session:
+                conv = session.get(ConversationModel, conversation_id)
+                if conv is None:
+                    raise ConversationNotFoundError(f"Conversation {conversation_id!r} not found.")
+                conv.title = clean
+                conv.title_is_custom = True
+                conv.updated_at = utc_now()
+                session.commit()
+                session.refresh(conv)
+                return _conv_to_summary(conv)
+
+        return _with_busy_retry(_run)
+
     def list_conversations(self, limit: int = 100) -> Sequence[ConversationSummary]:
         """Return conversations ordered by updated_at descending."""
 
@@ -477,13 +499,20 @@ class SqliteConversationStore:
                     now = utc_now()
 
                     # --- Allocate two sequence numbers atomically AND update conversation updated_at ---
+                    update_values: dict[str, Any] = {
+                        "next_sequence": ConversationModel.next_sequence + 2,
+                        "updated_at": now,
+                    }
+                    if conv.title == "New Conversation" and not getattr(
+                        conv, "title_is_custom", False
+                    ):
+                        derived = derive_conversation_title(user_content)
+                        if derived and derived != "New Conversation":
+                            update_values["title"] = derived
                     result = session.execute(
                         update(ConversationModel)
                         .where(ConversationModel.id == cid)
-                        .values(
-                            next_sequence=ConversationModel.next_sequence + 2,
-                            updated_at=now,
-                        )
+                        .values(**update_values)
                         .returning(ConversationModel.next_sequence)
                     ).fetchone()
                     if result is None:

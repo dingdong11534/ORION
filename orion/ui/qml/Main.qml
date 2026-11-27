@@ -44,6 +44,7 @@ ApplicationWindow {
     onWorkspacePanelOpenChanged: { if (workspacePanelOpen && activePage !== "workspace") activePage = "workspace" }
     property string activeConversationId: (typeof orion !== "undefined" && orion !== null) ? orion.activeConversationId : ""
     property bool isInitializing: true
+    property bool isSubmitting: false
 
     property var selectedKnowledgeIds: []
     property string knowledgeError: ""
@@ -206,17 +207,25 @@ ApplicationWindow {
         return "Assistant"
     }
 
+    function generateRequestUuid() {
+        return "req-" + Date.now().toString(16) + "-" + Math.random().toString(16).slice(2, 10)
+    }
+
     function sendMessage() {
         const message = chatPage.composerField.text.trim()
-        if (message.length === 0 || root.busy)
+        if (message.length === 0 || root.busy || root.isSubmitting)
             return
+
+        root.isSubmitting = true
+        chatPage.composerField.text = ""
+        const reqId = root.generateRequestUuid()
 
         chatModel.append({
             role: "user",
             text: message,
             status: "completed",
             isError: false,
-            requestId: "",
+            requestId: reqId,
             thinkingText: "",
             thinkingExpanded: false,
             userCollapsedThinking: false,
@@ -234,7 +243,7 @@ ApplicationWindow {
             text: "",
             status: "pending",
             isError: false,
-            requestId: "",
+            requestId: reqId,
             thinkingText: "",
             thinkingExpanded: false,
             userCollapsedThinking: false,
@@ -247,16 +256,21 @@ ApplicationWindow {
             productivityActionJson: ""
         })
 
-        chatPage.composerField.text = ""
         Qt.callLater(function() {
             chatPage.chatListView.positionViewAtEnd()
         })
 
-        if (typeof orion !== "undefined" && orion !== null) {
-            const effectiveMode = root.knowledgeMode === "selected_sources"
-                ? "selected_sources"
-                : (root.knowledgeMode === "ask_knowledge" ? "ask_knowledge" : (root.selectedKnowledgeIds.length > 0 ? "selected_sources" : "chat"))
-            orion.sendMessageWithScope(message, effectiveMode, root.selectedKnowledgeIds)
+        try {
+            if (typeof orion !== "undefined" && orion !== null) {
+                const effectiveMode = root.knowledgeMode === "selected_sources"
+                    ? "selected_sources"
+                    : (root.knowledgeMode === "ask_knowledge" ? "ask_knowledge" : (root.selectedKnowledgeIds.length > 0 ? "selected_sources" : "chat"))
+                orion.sendMessageWithScopeAndRequestId(message, effectiveMode, root.selectedKnowledgeIds, reqId)
+            }
+        } finally {
+            Qt.callLater(function() {
+                root.isSubmitting = false
+            })
         }
     }
 
@@ -292,6 +306,11 @@ ApplicationWindow {
 
         function onActiveConversationChanged(convId) {
             root.activeConversationId = convId
+        }
+
+        function onFocusComposerRequested() {
+            root.activePage = "chat"
+            chatPage.composerField.forceActiveFocus()
         }
 
         function onHistoryLoaded(messages) {
@@ -761,7 +780,7 @@ ApplicationWindow {
                     onClicked: {
                         root.activePage = "chat"
                         if (typeof orion !== "undefined" && orion !== null)
-                            orion.newConversation()
+                            orion.createNewConversation()
                     }
                     background: Rectangle { radius: theme.radiusSm; color: theme.bgSurface; border.width: 1; border.color: theme.borderStrong }
                     contentItem: Text {

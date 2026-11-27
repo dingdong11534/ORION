@@ -140,6 +140,25 @@ class MessageStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+def derive_conversation_title(message: str, max_len: int = 48) -> str:
+    """Derive a deterministic conversation title from the first user message (no LLM)."""
+    import re
+
+    text = re.sub(r"[*_`~#>\[\]]", "", message or "")
+    text = " ".join(text.split()).strip()
+    if not text:
+        return "New Conversation"
+    # Take first sentence
+    m = re.split(r"(?<=[.!?])\s+|\n", text, maxsplit=1)
+    first = m[0].strip() if m and m[0].strip() else text
+    if len(first) <= max_len:
+        return first
+    cut = first[:max_len].rsplit(" ", 1)[0].strip()
+    if not cut:
+        cut = first[:max_len].strip()
+    return f"{cut}..."
+
+
 class ConversationSummary(BaseModel):
     """Immutable summary of a conversation thread."""
 
@@ -147,6 +166,7 @@ class ConversationSummary(BaseModel):
 
     id: str
     title: str
+    title_is_custom: bool = False
     created_at: datetime
     updated_at: datetime
     knowledge_scope: str = "none"

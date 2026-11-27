@@ -45,12 +45,18 @@ def test_alembic_0008_reversible_on_populated_db(tmp_path: Path):
 
     command.upgrade(cfg, "0007")
     engine = create_db_engine(db_path)
-    sf = create_session_factory(engine)
-    with sf() as session, session.begin():
-        session.add(ConversationModel(id="conv_keep", title="Keep Me"))
+    with engine.begin() as conn:
+        import sqlalchemy as sa
+
+        conn.execute(
+            sa.text(
+                "INSERT INTO conversations (id, title, next_sequence, created_at, updated_at) "
+                "VALUES ('conv_keep', 'Keep Me', 0, '2026-11-27T00:00:00Z', '2026-11-27T00:00:00Z')"
+            )
+        )
     engine.dispose()
 
-    command.upgrade(cfg, "0008")
+    command.upgrade(cfg, "0009")
     engine = create_db_engine(db_path)
     sf = create_session_factory(engine)
     ctx_store = SqliteProductivityContextStore(sf)
@@ -61,19 +67,23 @@ def test_alembic_0008_reversible_on_populated_db(tmp_path: Path):
 
     command.downgrade(cfg, "0007")
     engine = create_db_engine(db_path)
-    sf = create_session_factory(engine)
-    with sf() as session:
-        assert session.get(ConversationModel, "conv_keep") is not None
+    with engine.connect() as conn:
+        import sqlalchemy as sa
+
+        title = conn.execute(
+            sa.text("SELECT title FROM conversations WHERE id='conv_keep'")
+        ).scalar_one()
+        assert title == "Keep Me"
     engine.dispose()
 
-    command.upgrade(cfg, "0008")
+    command.upgrade(cfg, "0009")
 
 
 def test_persistent_context_survives_restart_and_expires_after_5_turns(tmp_path: Path):
     db_path = tmp_path / "ctx.db"
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
-    command.upgrade(cfg, "0008")
+    command.upgrade(cfg, "0009")
 
     engine = create_db_engine(db_path)
     sf = create_session_factory(engine)
@@ -127,7 +137,7 @@ def test_today_overview_asia_kolkata_midnight_and_date_only(tmp_path: Path):
     db_path = tmp_path / "tz.db"
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
-    command.upgrade(cfg, "0008")
+    command.upgrade(cfg, "0009")
     engine = create_db_engine(db_path)
     sf = create_session_factory(engine)
 
@@ -162,7 +172,7 @@ def test_ordinal_selection_from_ambiguous_list(tmp_path: Path):
     db_path = tmp_path / "ord.db"
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
-    command.upgrade(cfg, "0008")
+    command.upgrade(cfg, "0009")
     engine = create_db_engine(db_path)
     sf = create_session_factory(engine)
     with sf() as session, session.begin():

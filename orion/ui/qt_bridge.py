@@ -54,12 +54,34 @@ def _scope_to_mode(scope_str: str) -> str:
     return "chat"
 
 
+def _format_relative_time(dt: Any) -> str:
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    target = dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
+    secs = max(0, int((now - target).total_seconds()))
+    if secs < 60:
+        return "Just now"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    days = secs // 86400
+    if days == 1:
+        return "Yesterday"
+    if days < 7:
+        return f"{days}d ago"
+    return target.strftime("%b %-d")
+
+
 def _conv_to_dict(c: ConversationSummary) -> dict[str, Any]:
     return {
         "id": c.id,
         "title": c.title,
+        "title_is_custom": bool(getattr(c, "title_is_custom", False)),
         "created_at": c.created_at.isoformat(),
         "updated_at": c.updated_at.isoformat(),
+        "relative_time": _format_relative_time(c.updated_at),
         "knowledge_scope": getattr(c, "knowledge_scope", "none"),
         "selected_document_ids": list(getattr(c, "selected_document_ids", ())),
         "active_document_id": getattr(c, "active_document_id", None) or "",
@@ -103,6 +125,8 @@ class OrionBridge(QObject):
     historyLoaded = Signal(list)
     conversationCreated = Signal(dict)
     conversationDeleted = Signal(str)
+    conversationRenamed = Signal(dict)
+    focusComposerRequested = Signal()
 
     approvalRequested = Signal(dict)
     approvalResolved = Signal(str, str)
@@ -940,7 +964,11 @@ class OrionBridge(QObject):
 
     @Slot()
     def createNewConversation(self) -> None:
-        """Create a new conversation record and make it active asynchronously."""
+        """Create a new conversation record and make it active asynchronously.
+
+        If the current active conversation has zero messages, refocus the composer
+        instead of creating a duplicate empty record.
+        """
         if self._is_shutting_down:
             self.errorOccurred.emit("Application is shutting down. Request rejected.")
             return
@@ -949,10 +977,39 @@ class OrionBridge(QObject):
             self.errorOccurred.emit("An operation is already in progress. Please wait.")
             return
 
+        active_id = self._service.active_conversation_id
+        if active_id:
+            try:
+                msgs = self._service.get_conversation_messages(active_id)
+                if len(msgs) == 0:
+                    self.focusComposerRequested.emit()
+                    return
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to check active conversation messages: %s", exc)
+
         def _task() -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
             conv = self._service.create_new_conversation("New Conversation")
             convs = [_conv_to_dict(c) for c in self._service.list_conversations()]
             return ("conversation_created", _conv_to_dict(conv), convs)
+
+        task_id = generate_request_id()
+        self._start_worker(task_id, _task)
+
+    @Slot(str, str)
+    def renameConversation(self, conversation_id: str, new_title: str) -> None:
+        """Rename a conversation asynchronously and lock against auto-titling."""
+        if self._is_shutting_down:
+            self.errorOccurred.emit("Application is shutting down. Request rejected.")
+            return
+        cid = conversation_id.strip()
+        title = " ".join((new_title or "").split()).strip()
+        if not cid or not title:
+            return
+
+        def _task() -> tuple[str, dict[str, Any], list[dict[str, Any]]]:
+            conv = self._service.rename_conversation(cid, title)
+            convs = [_conv_to_dict(c) for c in self._service.list_conversations()]
+            return ("conversation_renamed", _conv_to_dict(conv), convs)
 
         task_id = generate_request_id()
         self._start_worker(task_id, _task)
@@ -1117,6 +1174,15 @@ class OrionBridge(QObject):
     @Slot(str, str, list)
     def sendMessageWithScope(self, message: str, mode: str, selected_document_ids: list) -> None:
         """Initiate background message processing with explicit KnowledgeScope."""
+        self.sendMessageWithScopeAndRequestId(
+            message, mode, selected_document_ids, generate_request_id()
+        )
+
+    @Slot(str, str, list, str)
+    def sendMessageWithScopeAndRequestId(
+        self, message: str, mode: str, selected_document_ids: list, client_request_id: str
+    ) -> None:
+        """Initiate background message processing with explicit KnowledgeScope and client request ID."""
         if self._is_shutting_down:
             self.errorOccurred.emit("Application is shutting down. Request rejected.")
             return
@@ -1139,7 +1205,7 @@ class OrionBridge(QObject):
             scope = KnowledgeScope.NONE
 
         target_cid = self._service.active_conversation_id
-        request_id = generate_request_id()
+        request_id = (client_request_id or "").strip() or generate_request_id()
         self._current_request_id = request_id
         doc_ids = [str(d) for d in (selected_document_ids or []) if str(d).strip()]
 
@@ -1251,6 +1317,13 @@ class OrionBridge(QObject):
                 self.historyLoaded.emit([])
                 self.conversationKnowledgeContextChanged.emit("chat", [])
                 self.knowledgeModeChanged.emit("chat")
+                self.focusComposerRequested.emit()
+                return
+            if tag == "conversation_renamed":
+                _, conv_dict, convs = result
+                self.conversationRenamed.emit(conv_dict)
+                active_id = self._service.active_conversation_id or conv_dict["id"]
+                self.conversationsLoaded.emit(convs, active_id)
                 return
             if tag == "conversation_deleted":
                 _, deleted_id, was_active, convs, active_id = result

@@ -608,6 +608,16 @@ Rectangle {
                         wrapMode: TextEdit.Wrap
                         background: null
                         Keys.onReturnPressed: function(event) {
+                            if (composer.inputMethodComposing)
+                                return
+                            if (!(event.modifiers & Qt.ShiftModifier)) {
+                                event.accepted = true
+                                root.sendMessage()
+                            }
+                        }
+                        Keys.onEnterPressed: function(event) {
+                            if (composer.inputMethodComposing)
+                                return
                             if (!(event.modifiers & Qt.ShiftModifier)) {
                                 event.accepted = true
                                 root.sendMessage()
@@ -639,7 +649,7 @@ Rectangle {
                     id: sendButton
                     objectName: "sendButton"
                     visible: !root.busy
-                    enabled: composer.text.trim().length > 0
+                    enabled: !root.busy && !root.isSubmitting && composer.text.trim().length > 0
                     text: "Send"
                     implicitHeight: 36
                     implicitWidth: 78

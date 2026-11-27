@@ -79,6 +79,7 @@ class ConversationModel(Base):
 
     id: Mapped[str] = mapped_column(String(37), primary_key=True, default=generate_conversation_id)
     title: Mapped[str] = mapped_column(String, nullable=False, default="New Conversation")
+    title_is_custom: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     next_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     knowledge_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
     selected_document_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
