@@ -204,12 +204,13 @@ def test_qml_persistent_mic_visibility_navigation_and_locked_session(tmp_path: P
         voice_machine=machine,
     )
 
-    QApplication.instance() or QApplication(["orion-vf-qml"])
+    app = QApplication.instance() or QApplication(["orion-vf-qml"])
     qml = QQmlApplicationEngine()
     qml.rootContext().setContextProperty("orion", bridge)
     qml.load(QUrl.fromLocalFile(str(Path("orion/ui/qml/Main.qml").resolve())))
     root = qml.rootObjects()[0]
-    QTest.qWaitForWindowExposed(root)
+    QTest.qWait(60)
+    app.processEvents()
 
     # Persistent mic bar in Main window
     mic_bar = root.findChild(QQuickItem, "persistentMicBar")
