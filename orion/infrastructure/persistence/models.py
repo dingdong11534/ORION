@@ -12,7 +12,9 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -57,6 +59,16 @@ def generate_request_id() -> str:
     return f"req_{uuid.uuid4().hex}"
 
 
+def generate_document_id() -> str:
+    """Generate prefixed UUIDv4 for an indexed document source ('doc_' + 32 hex chars)."""
+    return f"doc_{uuid.uuid4().hex}"
+
+
+def generate_chunk_id() -> str:
+    """Generate prefixed UUIDv4 for an indexed document chunk ('chk_' + 32 hex chars)."""
+    return f"chk_{uuid.uuid4().hex}"
+
+
 class Base(DeclarativeBase):
     """Base declarative class for all SQLAlchemy ORM models."""
 
@@ -68,7 +80,13 @@ class ConversationModel(Base):
 
     id: Mapped[str] = mapped_column(String(37), primary_key=True, default=generate_conversation_id)
     title: Mapped[str] = mapped_column(String, nullable=False, default="New Conversation")
+    title_is_custom: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     next_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    knowledge_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    selected_document_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    active_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_knowledge_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_references_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime, nullable=False, default=utc_now, onupdate=utc_now
@@ -226,3 +244,366 @@ class UserSettingModel(Base):
         CheckConstraint("length(trim(key)) > 0", name="ck_user_settings_key_not_blank"),
         CheckConstraint("json_valid(value_json) = 1", name="ck_user_settings_value_json_valid"),
     )
+
+
+class DocumentSourceModel(Base):
+    """Persisted metadata for a user-selected local document in the Knowledge Base."""
+
+    __tablename__ = "document_sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_document_id)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    source_path: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    file_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    modified_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    indexed_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    ingestion_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    extraction_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(String, nullable=True)
+    author: Mapped[str | None] = mapped_column(String, nullable=True)
+    total_chapters: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_reading_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    display_reading_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reading_policy: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="whole_document"
+    )
+    range_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    range_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    progress_updated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+    chunks: Mapped[list["DocumentChunkModel"]] = relationship(
+        "DocumentChunkModel",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (Index("idx_document_sources_indexed_at", "indexed_at"),)
+
+
+class DocumentChunkModel(Base):
+    """Persisted bounded text chunk belonging to a DocumentSourceModel."""
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_chunk_id)
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("document_sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    section_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    spine_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chapter_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reading_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    display_chapter_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chapter_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_locator: Mapped[str | None] = mapped_column(String, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    document: Mapped["DocumentSourceModel"] = relationship(
+        "DocumentSourceModel", back_populates="chunks"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_doc_idx"),
+        Index("idx_document_chunks_document_id", "document_id"),
+    )
+
+
+def generate_task_id() -> str:
+    return f"tsk_{uuid.uuid4().hex}"
+
+
+def generate_habit_id() -> str:
+    return f"hab_{uuid.uuid4().hex}"
+
+
+def generate_habit_completion_id() -> str:
+    return f"hc_{uuid.uuid4().hex}"
+
+
+def generate_productivity_action_id() -> str:
+    return f"pact_{uuid.uuid4().hex}"
+
+
+class TaskModel(Base):
+    """Persisted personal productivity task."""
+
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=generate_task_id)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="todo")
+    priority: Mapped[str] = mapped_column(String(32), nullable=False, default="medium")
+    due_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    due_is_date_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("length(trim(title)) > 0", name="ck_tasks_title_not_blank"),
+        CheckConstraint(
+            "status IN ('todo', 'in_progress', 'done', 'cancelled')",
+            name="ck_tasks_status_valid",
+        ),
+        CheckConstraint(
+            "priority IN ('critical', 'high', 'medium', 'low')",
+            name="ck_tasks_priority_valid",
+        ),
+        Index("idx_tasks_status_archived", "status", "archived_at"),
+        Index("idx_tasks_due_at", "due_at"),
+        Index("idx_tasks_priority", "priority"),
+    )
+
+
+class HabitModel(Base):
+    """Persisted personal habit definition."""
+
+    __tablename__ = "habits"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=generate_habit_id)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    frequency: Mapped[str] = mapped_column(String(32), nullable=False, default="daily")
+    target_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    archived_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+    completions: Mapped[list["HabitCompletionModel"]] = relationship(
+        "HabitCompletionModel",
+        back_populates="habit",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(trim(name)) > 0", name="ck_habits_name_not_blank"),
+        CheckConstraint(
+            "frequency IN ('daily', 'weekly', 'monthly')",
+            name="ck_habits_frequency_valid",
+        ),
+        CheckConstraint("target_count >= 1", name="ck_habits_target_count_pos"),
+        Index("idx_habits_archived", "archived_at"),
+        Index("idx_habits_name", "name"),
+    )
+
+
+class HabitCompletionModel(Base):
+    """Authoritative completion record for a habit on a local calendar date."""
+
+    __tablename__ = "habit_completions"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=generate_habit_completion_id
+    )
+    habit_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("habits.id", ondelete="CASCADE"), nullable=False
+    )
+    completed_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    completed_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    habit: Mapped["HabitModel"] = relationship("HabitModel", back_populates="completions")
+
+    __table_args__ = (
+        UniqueConstraint("habit_id", "completed_date", name="uq_habit_completions_habit_date"),
+        Index("idx_habit_completions_habit_date", "habit_id", "completed_date"),
+    )
+
+
+class ProductivityActionRecordModel(Base):
+    """Idempotency and undo/audit record for natural-language productivity actions."""
+
+    __tablename__ = "productivity_action_records"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=generate_productivity_action_id
+    )
+    client_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    intent: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    entity_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    undo_payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("client_request_id", "intent", name="uq_productivity_action_req_intent"),
+        Index("idx_productivity_actions_conv", "conversation_id"),
+        Index("idx_productivity_actions_created", "created_at"),
+    )
+
+
+class ConversationProductivityContextModel(Base):
+    """Persisted per-conversation productivity entity context (IDs only, no chat payloads)."""
+
+    __tablename__ = "conversation_productivity_context"
+
+    conversation_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_habit_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_list_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    last_list_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    last_entity_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    user_turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_task_turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_habit_turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_list_turn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pending_confirmation_action_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+
+class UserProfileModel(Base):
+    """Trusted user profile (explicitly edited by user, never silently mutated by LLM)."""
+
+    __tablename__ = "user_profile"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
+    preferred_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Kolkata")
+    response_preferences: Mapped[str | None] = mapped_column(Text, nullable=True)
+    work_study_preferences: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+
+class PersonalMemoryModel(Base):
+    """Local reviewable long-term memory, project, goal, or routine."""
+
+    __tablename__ = "personal_memories"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="fact")
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="user_explicit")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+    __table_args__ = (Index("idx_personal_memories_cat_status", "category", "status"),)
+
+
+class LocalReminderModel(Base):
+    """Persistent local reminder with quiet hours."""
+
+    __tablename__ = "local_reminders"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False, default="checkin")
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remind_time: Mapped[str] = mapped_column(String(5), nullable=False, default="09:00")
+    quiet_start: Mapped[str] = mapped_column(String(5), nullable=False, default="22:00")
+    quiet_end: Mapped[str] = mapped_column(String(5), nullable=False, default="07:00")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_triggered_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+
+class AutomationJobModel(Base):
+    """Persistent background automation job independent of UI/session lifetime."""
+
+    __tablename__ = "automation_jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_request_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    workflow_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED")
+    browser_lease_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checkpoint_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    cancellation_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    steps: Mapped[list["AutomationJobStepModel"]] = relationship(
+        "AutomationJobStepModel",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (Index("idx_automation_jobs_status", "status"),)
+
+
+class AutomationJobStepModel(Base):
+    """Individual checkpointed step within an automation job."""
+
+    __tablename__ = "automation_job_steps"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("automation_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    idempotent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
+    input_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    job: Mapped["AutomationJobModel"] = relationship("AutomationJobModel", back_populates="steps")
+
+    __table_args__ = (UniqueConstraint("job_id", "step_index", name="uq_automation_job_step_idx"),)
+
+
+class ApprovedApplicationModel(Base):
+    """User-approved desktop application registry entry."""
+
+    __tablename__ = "approved_applications"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    executable_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    allowed_args_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    approved_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+
+class AutomationAuditEventModel(Base):
+    """Structured audit trail for native automation, browser, and launcher operations."""
+
+    __tablename__ = "automation_audit_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    capability_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_origin: Mapped[str] = mapped_column(String(64), nullable=False)
+    approval_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("idx_automation_audit_job", "job_id"),)

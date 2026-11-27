@@ -199,7 +199,11 @@ def test_no_model_create_all_used_in_integration_tests(tmp_path: Path):
     engine = create_db_engine(db_file)
     insp = sa_inspect(engine)
     orm_tables = set(Base.metadata.tables.keys())
-    db_tables = set(insp.get_table_names()) - {"alembic_version"}
+    all_db_tables = set(insp.get_table_names())
+    assert "document_chunks_fts" in all_db_tables
+    db_tables = {
+        t for t in all_db_tables - {"alembic_version"} if not t.startswith("document_chunks_fts")
+    }
     assert orm_tables == db_tables
 
 

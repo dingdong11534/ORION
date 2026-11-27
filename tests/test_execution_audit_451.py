@@ -456,7 +456,10 @@ def test_qml_execution_drawer_controls_bounding_and_dismiss(
     # Read-only & PlainText enforcement (Main.qml sets textFormat: TextEdit.PlainText)
     assert stdout_disp.property("readOnly") is True
     assert stderr_disp.property("readOnly") is True
-    qml_src = qml_file.read_text()
+    qml_src = (
+        qml_file.read_text()
+        + (qml_file.parent / "components" / "OrionExecutionDrawer.qml").read_text()
+    )
     assert 'objectName: "stdoutDisplay"' in qml_src
     assert 'objectName: "stderrDisplay"' in qml_src
     assert qml_src.count("textFormat: TextEdit.PlainText") >= 2

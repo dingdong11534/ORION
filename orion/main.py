@@ -33,7 +33,7 @@ from orion.ui.qt_bridge import OrionBridge
 logger = logging.getLogger(__name__)
 
 # Maintained for backward compatibility with existing tests
-_EXPECTED_ALEMBIC_REVISION = "0002"
+_EXPECTED_ALEMBIC_REVISION = "0011"
 
 
 def activate_window(engine: QQmlApplicationEngine) -> None:
@@ -109,14 +109,14 @@ def check_database_migration(
 def create_model_provider() -> ModelProvider:
     """Create and return configured ModelProvider based on environment variables.
 
-    Defaults to OllamaModelProvider with qwen2.5:1.5b. Does not connect to the
+    Defaults to OllamaModelProvider with qwen3:1.7b. Does not connect to the
     server on startup; network connectivity is deferred until inference requests.
     """
     provider_type = os.environ.get("ORION_MODEL_PROVIDER", "ollama").strip().lower()
 
     if provider_type == "ollama":
         base_url = os.environ.get("ORION_OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
-        model_name = os.environ.get("ORION_OLLAMA_MODEL", "qwen2.5:1.5b").strip()
+        model_name = os.environ.get("ORION_OLLAMA_MODEL", "qwen3:1.7b").strip()
         think_env = os.environ.get("ORION_OLLAMA_THINK", "false").strip().lower()
         think = think_env in ("true", "1", "yes")
         return OllamaModelProvider(base_url=base_url, model_name=model_name, think=think)
@@ -182,14 +182,147 @@ def main() -> int:
             print(f"ORION CONFIGURATION ERROR:\n{exc}", file=sys.stderr)
             return 1
 
+        if os.environ.get("ORION_MODEL_PROVIDER", "").strip().lower() == "ollama" and isinstance(
+            model_provider, OllamaModelProvider
+        ):
+            import urllib.request
+
+            try:
+                with urllib.request.urlopen(
+                    f"{model_provider.base_url}/api/tags", timeout=3.0
+                ) as r:
+                    r.read()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"ORION STARTUP ERROR:\n"
+                    f"ORION_MODEL_PROVIDER=ollama was requested, but Ollama at "
+                    f"{model_provider.base_url} is unavailable: {exc}\n"
+                    f"Start Ollama ('ollama serve') and retry.",
+                    file=sys.stderr,
+                )
+                return 1
+
+        from orion.application.knowledge.retrieval import (
+            DocumentRetrievalService,
+            KnowledgeService,
+        )
+        from orion.application.productivity.action_policy import ProductivityActionCoordinator
+        from orion.application.productivity.habit_service import HabitService
+        from orion.application.productivity.task_service import TaskService
+        from orion.infrastructure.knowledge.extractor import LocalDocumentExtractor
+        from orion.infrastructure.knowledge.repository import SqliteKnowledgeStore
+        from orion.infrastructure.productivity.repository import (
+            SqliteHabitStore,
+            SqliteProductivityActionStore,
+            SqliteProductivityContextStore,
+            SqliteTaskStore,
+            SystemClock,
+        )
+
+        knowledge_store = SqliteKnowledgeStore(session_factory)
+        retrieval_service = DocumentRetrievalService(knowledge_store)
+        knowledge_service = KnowledgeService(
+            extractor=LocalDocumentExtractor(),
+            store=knowledge_store,
+            event_recorder=conversation_store.record_activity_event,
+        )
+
+        clock = SystemClock()
+        task_service = TaskService(SqliteTaskStore(session_factory), clock)
+        habit_service = HabitService(SqliteHabitStore(session_factory), clock)
+        productivity_coordinator = ProductivityActionCoordinator(
+            task_service=task_service,
+            habit_service=habit_service,
+            clock=clock,
+            action_store=SqliteProductivityActionStore(session_factory),
+            context_store=SqliteProductivityContextStore(session_factory),
+        )
+
+        # 7b. Construct offline voice service (lazy model loading + idle unload)
+        from orion.application.voice.heavy_work_gate import HeavyWorkGate
+        from orion.application.voice.voice_service import VoiceService
+        from orion.infrastructure.voice.audio_io import PipeWireAudioInput, PipeWireAudioOutput
+        from orion.infrastructure.voice.piper_tts import PiperTtsAdapter
+        from orion.infrastructure.voice.whispercpp_stt import WhisperCppSttAdapter
+
+        voice_service = VoiceService(
+            stt=WhisperCppSttAdapter(),
+            tts=PiperTtsAdapter(),
+            audio_in=PipeWireAudioInput(),
+            audio_out=PipeWireAudioOutput(),
+            gate=HeavyWorkGate(),
+        )
+
+        from orion.application.identity.capabilities import CapabilityRegistry
+        from orion.application.identity.identity_service import OrionIdentityService
+        from orion.application.memory.memory_service import PersonalMemoryService
+        from orion.application.productivity.daily_briefing import DailyBriefingService
+        from orion.application.web.web_search_service import PublicWebSearchService
+        from orion.infrastructure.memory.repository import SqlitePersonalMemoryStore
+
+        memory_service = PersonalMemoryService(SqlitePersonalMemoryStore(session_factory))
+        web_search_service = PublicWebSearchService()
+        briefing_service = DailyBriefingService(
+            task_service=task_service,
+            habit_service=habit_service,
+            clock=clock,
+            session_factory=session_factory,
+            memory_service=memory_service,
+        )
+
+        capability_registry = CapabilityRegistry(
+            model_provider=model_provider,
+            knowledge_service=knowledge_service,
+            workspace_enabled=True,
+            task_service=task_service,
+            habit_service=habit_service,
+            voice_service=voice_service,
+            web_search_service=web_search_service,
+            memory_service=memory_service,
+        )
+        identity_service = OrionIdentityService(capability_registry)
+
         assistant_service = AssistantService(
             model_provider=model_provider,
             conversation_store=conversation_store,
             settings_store=settings_store,
+            retrieval_service=retrieval_service,
+            productivity_coordinator=productivity_coordinator,
+            identity_service=identity_service,
+            memory_service=memory_service,
+            web_search_service=web_search_service,
+            briefing_service=briefing_service,
         )
 
+        from orion.application.jobs.supervisor import BackgroundJobSupervisor
+        from orion.application.launcher.app_registry import ApplicationRegistryService
+        from orion.application.session.interaction_session import InteractionSession
+        from orion.infrastructure.browser.playwright_browser_service import PlaywrightBrowserService
+        from orion.infrastructure.downloads.inbox_service import OrionInboxService
+        from orion.infrastructure.jobs.repository import SqliteBackgroundJobStore
+
+        job_store = SqliteBackgroundJobStore(session_factory)
+        job_supervisor = BackgroundJobSupervisor(job_store)
+        interaction_session = InteractionSession(enabled=True)
+        browser_service = PlaywrightBrowserService()
+        app_registry = ApplicationRegistryService(session_factory, audit_store=job_store)
+        app_registry.detect_default_apps()
+        _inbox_service = OrionInboxService()
+
         # 8. Construct OrionBridge & coordinate graceful lifecycle
-        bridge = OrionBridge(assistant_service=assistant_service)
+        bridge = OrionBridge(
+            assistant_service=assistant_service,
+            knowledge_service=knowledge_service,
+            task_service=task_service,
+            habit_service=habit_service,
+            productivity_coordinator=productivity_coordinator,
+            voice_service=voice_service,
+            memory_service=memory_service,
+            session_factory=session_factory,
+            interaction_session=interaction_session,
+            job_store=job_store,
+            job_supervisor=job_supervisor,
+        )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,
             bridge=bridge,
@@ -203,9 +336,10 @@ def main() -> int:
         from orion.infrastructure.tools.workspace_tools import build_workspace_tool_system
 
         workspace_root = get_configured_workspace_root()
-        tool_registry, _tool_router, _ = build_workspace_tool_system(workspace_root)
+        tool_registry, tool_router, _ = build_workspace_tool_system(workspace_root)
         execution_manager = ExecutionManager(workspace_root=workspace_root)
         bridge.set_execution_manager(execution_manager)
+        bridge.set_workspace_tools(tool_router, workspace_root)
         logger.info(
             "Sealed tool registry with %d tools for workspace '%s'",
             len(tool_registry),
@@ -225,8 +359,16 @@ def main() -> int:
             print("ERROR: Failed to load ORION interface.", file=sys.stderr)
             return 1
 
+        if "--background" in sys.argv[1:]:
+            bridge.setBackgroundMode(True)
+
         return app.exec()
     finally:
+        if "browser_service" in locals() and browser_service is not None:
+            try:
+                browser_service.close_browser()
+            except Exception:  # noqa: BLE001, S110
+                pass
         if lifecycle is not None:
             # aboutToQuit uses the default 5 s timeout; this final call blocks
             # indefinitely so the process never exits with active workers.

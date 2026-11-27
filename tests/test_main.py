@@ -84,7 +84,7 @@ def test_check_migration_dynamically_resolves_head_revision(tmp_path: Path):
 
 
 def test_create_model_provider_defaults_to_ollama(monkeypatch):
-    """Default configuration returns OllamaModelProvider with qwen2.5:1.5b."""
+    """Default configuration returns OllamaModelProvider with qwen3:1.7b."""
     monkeypatch.delenv("ORION_MODEL_PROVIDER", raising=False)
     monkeypatch.delenv("ORION_OLLAMA_BASE_URL", raising=False)
     monkeypatch.delenv("ORION_OLLAMA_MODEL", raising=False)
@@ -94,7 +94,7 @@ def test_create_model_provider_defaults_to_ollama(monkeypatch):
     provider = create_model_provider()
     assert isinstance(provider, OllamaModelProvider)
     assert provider.base_url == "http://127.0.0.1:11434"
-    assert provider.model_name == "qwen2.5:1.5b"
+    assert provider.model_name == "qwen3:1.7b"
     assert provider.think is False
 
 
@@ -143,3 +143,32 @@ def test_create_model_provider_unsupported_raises(monkeypatch):
 
     assert "Unsupported ORION_MODEL_PROVIDER" in str(exc_info.value)
     assert "openai" in str(exc_info.value)
+
+
+def test_ollama_provider_display_and_simulated_detection(tmp_path: Path):
+    """AssistantService reports real Ollama model vs Simulation Mode accurately."""
+    from orion.application.assistant_service import AssistantService
+    from orion.infrastructure.fake_model_provider import FakeModelProvider
+    from orion.infrastructure.ollama_model_provider import OllamaModelProvider
+    from orion.infrastructure.persistence.database import create_db_engine, create_session_factory
+    from orion.infrastructure.persistence.repositories import (
+        SqliteConversationStore,
+        SqliteSettingsStore,
+    )
+
+    db_file = tmp_path / "prov.db"
+    cfg = Config(str(Path(__file__).parent.parent / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_file}")
+    command.upgrade(cfg, "head")
+    eng = create_db_engine(db_file)
+    fac = create_session_factory(eng)
+    conv, settings = SqliteConversationStore(fac), SqliteSettingsStore(fac)
+
+    svc_ollama = AssistantService(OllamaModelProvider(model_name="qwen3:1.7b"), conv, settings)
+    assert svc_ollama.is_simulated_provider() is False
+    assert svc_ollama.get_provider_display() == "Ollama · qwen3:1.7b"
+
+    svc_fake = AssistantService(FakeModelProvider(), conv, settings)
+    assert svc_fake.is_simulated_provider() is True
+    assert svc_fake.get_provider_display() == "Simulation Mode"
+    eng.dispose()

@@ -1,1731 +1,467 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "components"
+import "pages"
 
 ApplicationWindow {
     id: root
-    objectName: "mainWindow"
-
-    visible: true
-    width: 1100
-    height: 720
-    minimumWidth: 800
-    minimumHeight: 550
-
+    visible: !backgroundMode
+    width: 1280
+    height: 800
+    minimumWidth: 880
+    minimumHeight: 580
     title: "ORION"
-    color: "#F4F1E9"
+    color: Theme.window
 
     readonly property bool busy: (typeof orion !== "undefined" && orion !== null) ? orion.isBusy : false
     readonly property bool showThinking: (typeof orion !== "undefined" && orion !== null) ? orion.showThinking : false
     readonly property bool thinkingSupported: (typeof orion !== "undefined" && orion !== null) ? orion.thinkingSupported : false
+    readonly property bool knowledgeAvailable: (typeof orion !== "undefined" && orion !== null) ? orion.knowledgeAvailable : false
+    readonly property bool knowledgeBusy: (typeof orion !== "undefined" && orion !== null) ? orion.knowledgeBusy : false
+    readonly property string knowledgeMode: (typeof orion !== "undefined" && orion !== null) ? orion.knowledgeMode : "chat"
+    readonly property bool productivityAvailable: (typeof orion !== "undefined" && orion !== null) ? orion.productivityAvailable : false
+    readonly property bool workspaceToolBusy: (typeof orion !== "undefined" && orion !== null) ? orion.workspaceToolBusy : false
+    readonly property bool workspaceToolsAvailable: (typeof orion !== "undefined" && orion !== null) ? orion.workspaceToolsAvailable : false
+    readonly property string workspaceRoot: (typeof orion !== "undefined" && orion !== null) ? orion.workspaceRoot : ""
+    readonly property string providerDisplay: (typeof orion !== "undefined" && orion !== null) ? orion.providerDisplay : "Local"
+    readonly property bool isSimulatedProvider: (typeof orion !== "undefined" && orion !== null) ? orion.isSimulatedProvider : false
+    readonly property string supportedKnowledgeFormats: (typeof orion !== "undefined" && orion !== null) ? orion.supportedKnowledgeFormats : ""
+    readonly property string sessionState: (typeof orion !== "undefined" && orion !== null) ? orion.sessionState : "locked"
+    readonly property bool backgroundMode: (typeof orion !== "undefined" && orion !== null) ? orion.backgroundMode : false
     readonly property int maxThinkingChars: 32768
-    property string activeConversationId: (typeof orion !== "undefined" && orion !== null) ? orion.activeConversationId : ""
-    property bool isInitializing: true
 
+    property string activePage: "home" // "home" | "chat" | "knowledge" | "workspace" | "productivity" | "settings"
+    property bool workspacePanelOpen: false
+    onWorkspacePanelOpenChanged: { if (workspacePanelOpen && activePage !== "workspace") activePage = "workspace" }
+    property string activeConversationId: ""
+    property bool isInitializing: true
+    property bool isSubmitting: false
+    property var selectedKnowledgeIds: []
+    property string knowledgeError: ""
+    property string knowledgeStatusNote: ""
+    property var knowledgeSearchHits: []
+    property var epubChapters: []
+    property int epubChaptersTotal: 0
+    property int epubChaptersOffset: 0
+    property string epubChaptersDocId: ""
+    property string workspaceCurrentPath: ""
+    property string selectedWorkspaceFile: ""
+    property string workspaceResultPath: ""
+    property string workspaceResultContent: ""
+    property int workspaceResultSizeBytes: 0
+    property bool workspaceResultTruncated: false
+    property bool workspaceDirectoryTruncated: false
+    property string workspaceError: ""
+    property var prodTodayTasks: []
+    property var prodOverdueTasks: []
+    property var prodUpcomingTasks: []
+    property var prodUnscheduledTasks: []
+    property var prodAllTasks: []
+    property var prodHabits: []
+    property var memoryProfile: ({ preferred_name: "", timezone: "Asia/Kolkata" })
+    property var personalMemories: []
+    property var homeDashboard: ({})
+    property var backgroundJobs: []
+    property bool orbHidden: false
+    property string productivityError: ""
+    property string voiceErrorMessage: ""
     property string pendingDeleteId: ""
     property string pendingDeleteTitle: ""
-
-    ListModel {
-        id: conversationsModel
-        objectName: "conversationsModel"
-    }
-
-    ListModel {
-        id: chatModel
-        objectName: "chatModel"
-    }
-
-    ListModel {
-        id: pendingApprovalsModel
-        objectName: "pendingApprovalsModel"
-    }
-
+    property string pendingRenameId: ""
+    property string inspectorDocId: ""
+    property int inspectorChunkIndex: 0
+    property string inspectorText: ""
     property int approvalRemainingSeconds: 60
-
-    // ---- Execution display state ----
     property string executionId: ""
     property string executionCommand: ""
-    property var    executionArgs: []
+    property var executionArgs: []
     property string executionCwd: ""
-    property string executionStatus: ""   // "running" | "completed" | "failed" | "cancelled" | "timed_out"
+    property string executionStatus: "idle"
     property string executionStdout: ""
     property string executionStderr: ""
-    property int    executionExitCode: -1
-    property double executionDurationMs: 0
-    property double executionElapsedMs: 0
-    property bool   executionTruncated: false
+    property int executionExitCode: -1
+    property real executionDurationMs: 0
+    property real executionElapsedMs: 0
+    property bool executionTruncated: false
     property string executionError: ""
-    property bool   executionPanelVisible: false
+    property bool executionPanelVisible: false
     readonly property int maxExecutionDisplayStreamChars: 131072
 
-    Timer {
-        id: executionElapsedTimer
-        interval: 100
-        repeat: true
-        running: root.executionStatus === "running"
-        onTriggered: {
-            root.executionElapsedMs += 100
+    onActivePageChanged: {
+        if (activePage !== "chat" && typeof orion !== "undefined" && orion !== null)
+            orion.cancelVoiceRecording()
+        if (activePage === "productivity" && typeof orion !== "undefined" && orion !== null)
+            orion.loadProductivityData("", "", "", "priority_due")
+        if (activePage === "settings" && typeof orion !== "undefined" && orion !== null) {
+            orion.loadPersonalMemory()
+            orion.loadBackgroundJobs()
         }
     }
 
-    function getActiveTitle() {
-        if (!root.activeConversationId)
-            return "New Chat"
-        for (let i = 0; i < conversationsModel.count; i++) {
-            if (conversationsModel.get(i).id === root.activeConversationId)
-                return conversationsModel.get(i).title
+    onClosing: {
+        if (typeof orion !== "undefined" && orion !== null) {
+            orion.cancelVoiceRecording()
+            orion.stopSpeaking()
         }
-        return "Assistant"
     }
 
-    function sendMessage() {
-        const message = composer.text.trim()
+    ListModel { id: chatModel; objectName: "chatModel" }
+    ListModel { id: conversationsModel; objectName: "conversationsModel" }
+    ListModel { id: knowledgeSourcesModel; objectName: "knowledgeSourcesModel" }
+    ListModel { id: workspaceEntriesModel; objectName: "workspaceEntriesModel" }
+    ListModel { id: pendingApprovalsModel; objectName: "pendingApprovalsModel" }
 
-        if (message.length === 0 || root.busy)
-            return
-
-        chatModel.append({
-            role: "user",
-            text: message,
-            status: "completed",
-            isError: false,
-            thinkingText: "",
-            thinkingExpanded: false,
-            isThinkingActive: false,
-            thinkingTruncated: false
-        })
-
-        // Placeholder assistant message for incremental streaming output
-        chatModel.append({
-            role: "assistant",
-            text: "",
-            status: "pending",
-            isError: false,
-            thinkingText: "",
-            thinkingExpanded: false,
-            isThinkingActive: false,
-            thinkingTruncated: false
-        })
-
-        composer.clear()
-        composer.forceActiveFocus()
-        orion.sendMessage(message)
-
-        Qt.callLater(function() {
-            chatList.positionViewAtEnd()
-        })
-    }
-
-    function openDeleteConfirmation(convId, title) {
-        root.pendingDeleteId = convId
-        root.pendingDeleteTitle = title
-        deleteDialog.visible = true
+    OrionState {
+        root: root
+        chatModel: chatModel
+        conversationsModel: conversationsModel
+        knowledgeSourcesModel: knowledgeSourcesModel
+        workspaceEntriesModel: workspaceEntriesModel
+        pendingApprovalsModel: pendingApprovalsModel
     }
 
     Component.onCompleted: {
         if (typeof orion !== "undefined" && orion !== null) {
+            Theme.themeMode = orion.themeMode
+            root.activeConversationId = orion.activeConversationId
             orion.loadInitialState()
-        } else {
-            root.isInitializing = false
+            if (orion.knowledgeAvailable) orion.loadKnowledgeSources()
+            if (orion.productivityAvailable) {
+                orion.loadProductivityData("", "", "", "priority_due")
+                orion.loadHomeDashboard()
+            }
         }
     }
 
-    Connections {
-        target: orion
+    function getActiveTitle() {
+        for (let i = 0; i < conversationsModel.count; i++) {
+            const c = conversationsModel.get(i)
+            if (c.id === root.activeConversationId) return c.title
+        }
+        return "New Chat"
+    }
 
-        function onConversationsLoaded(convs, activeId) {
-            conversationsModel.clear()
-            for (let i = 0; i < convs.length; i++) {
-                conversationsModel.append(convs[i])
+    function startNewChat() {
+        root.activePage = "chat"
+        if (typeof orion !== "undefined" && orion !== null)
+            orion.createNewConversation()
+    }
+
+    function setChatKnowledgeMode(mode) {
+        if (typeof orion !== "undefined" && orion !== null) orion.setKnowledgeMode(mode)
+    }
+
+    function generateRequestUuid() {
+        return "req-" + Date.now().toString(16) + "-" + Math.random().toString(16).slice(2, 10)
+    }
+
+    function sendMessage() {
+        const message = chatPage.composerField.text.trim()
+        if (message.length === 0 || root.busy || root.isSubmitting) return
+        root.isSubmitting = true
+        chatPage.composerField.text = ""
+        const reqId = root.generateRequestUuid()
+        chatModel.append({ role: "user", text: message, status: "completed", isError: false, requestId: reqId, thinkingText: "", thinkingExpanded: false, userCollapsedThinking: false, isThinkingActive: false, isAnsweringActive: false, thinkingTruncated: false, isRagGrounded: false, referencesJson: "[]", referencesExpanded: false, productivityActionJson: "" })
+        chatModel.append({ role: "assistant", text: "", status: "pending", isError: false, requestId: reqId, thinkingText: "", thinkingExpanded: false, userCollapsedThinking: false, isThinkingActive: false, isAnsweringActive: false, thinkingTruncated: false, isRagGrounded: false, referencesJson: "[]", referencesExpanded: false, productivityActionJson: "" })
+        scrollChatToEnd()
+        try {
+            if (typeof orion !== "undefined" && orion !== null) {
+                const effectiveMode = root.knowledgeMode === "selected_sources" ? "selected_sources" : (root.knowledgeMode === "ask_knowledge" ? "ask_knowledge" : (root.selectedKnowledgeIds.length > 0 ? "selected_sources" : "chat"))
+                orion.sendMessageWithScopeAndRequestId(message, effectiveMode, root.selectedKnowledgeIds, reqId)
             }
-            root.activeConversationId = activeId
+        } finally {
+            Qt.callLater(function() { root.isSubmitting = false })
         }
+    }
 
-        function onActiveConversationChanged(convId) {
-            root.activeConversationId = convId
+    function scrollChatToEnd() { Qt.callLater(function() { chatPage.chatListView.positionViewAtEnd() }) }
+    function focusComposer() { chatPage.composerField.forceActiveFocus() }
+    function insertTranscriptIntoComposer(text) { chatPage.insertTranscript(text) }
+    function openKnowledgePage() { root.activePage = "knowledge" }
+    function startAskKnowledge(promptText, docIds) {
+        const ids = docIds ? docIds.slice() : []
+        root.selectedKnowledgeIds = ids
+        if (typeof orion !== "undefined" && orion !== null) {
+            orion.setConversationSelectedSources(ids)
+            orion.setKnowledgeMode(ids.length > 0 ? "selected_sources" : "ask_knowledge")
         }
-
-        function onHistoryLoaded(messages) {
-            chatModel.clear()
-            for (let i = 0; i < messages.length; i++) {
-                const msg = messages[i]
-                let isErr = (msg.status === "failed" || msg.status === "interrupted")
-                let displayText = msg.content
-                if (!displayText && msg.error_message) {
-                    displayText = msg.error_message
-                }
-                if (!displayText && msg.status === "interrupted") {
-                    displayText = "Request was interrupted. A retry must use a new client_request_id."
-                }
-                chatModel.append({
-                    role: msg.role,
-                    text: displayText || "",
-                    status: msg.status,
-                    isError: isErr,
-                    thinkingText: "",
-                    thinkingExpanded: false,
-                    isThinkingActive: false,
-                    thinkingTruncated: false
-                })
-            }
-            root.isInitializing = false
-            Qt.callLater(function() {
-                chatList.positionViewAtEnd()
-            })
+        root.activePage = "chat"
+        if (promptText && promptText.length > 0) {
+            chatPage.composerField.text = promptText
         }
-
-        function onConversationCreated(conversation) {
-            root.activeConversationId = conversation.id
-            chatModel.clear()
-            root.isInitializing = false
+        chatPage.composerField.forceActiveFocus()
+    }
+    function startSelectedSourcesChat() { startAskKnowledge("", root.selectedKnowledgeIds) }
+    function clearKnowledgeScope() {
+        root.selectedKnowledgeIds = []
+        if (typeof orion !== "undefined" && orion !== null) {
+            orion.setConversationSelectedSources([])
+            orion.setKnowledgeMode("chat")
         }
-
-        function onConversationDeleted(conversationId) {
-            if (root.activeConversationId === conversationId) {
-                root.activeConversationId = ""
-                chatModel.clear()
-            }
-        }
-
-        function onApprovalRequested(requestDict) {
-            pendingApprovalsModel.append(requestDict)
-            root.approvalRemainingSeconds = 60
-        }
-
-        function onApprovalResolved(approvalId, status) {
-            for (let i = 0; i < pendingApprovalsModel.count; i++) {
-                if (pendingApprovalsModel.get(i).approval_id === approvalId) {
-                    pendingApprovalsModel.remove(i)
-                    root.approvalRemainingSeconds = 60
-                    break
-                }
-            }
-        }
-
-        function onApprovalCancelled(approvalId) {
-            for (let i = 0; i < pendingApprovalsModel.count; i++) {
-                if (pendingApprovalsModel.get(i).approval_id === approvalId) {
-                    pendingApprovalsModel.remove(i)
-                    root.approvalRemainingSeconds = 60
-                    break
-                }
-            }
-        }
-
-        function onExecutionStarted(executionId, command, args, cwd) {
-            root.executionId = executionId
-            root.executionCommand = command
-            root.executionArgs = args
-            root.executionCwd = cwd
-            root.executionStatus = "running"
-            root.executionStdout = ""
-            root.executionStderr = ""
-            root.executionExitCode = -1
-            root.executionDurationMs = 0
-            root.executionElapsedMs = 0
-            root.executionTruncated = false
-            root.executionError = ""
-            root.executionPanelVisible = true
-        }
-
-        function onExecutionOutputChunk(executionId, stream, text) {
-            if (executionId === "" || executionId !== root.executionId) return
-            if (stream === "stdout") {
-                const rem = root.maxExecutionDisplayStreamChars - root.executionStdout.length
-                if (rem > 0) {
-                    root.executionStdout = root.executionStdout + (text.length > rem ? text.slice(0, rem) : text)
-                }
-                if (text.length > rem) {
-                    root.executionTruncated = true
-                }
-            } else {
-                const rem = root.maxExecutionDisplayStreamChars - root.executionStderr.length
-                if (rem > 0) {
-                    root.executionStderr = root.executionStderr + (text.length > rem ? text.slice(0, rem) : text)
-                }
-                if (text.length > rem) {
-                    root.executionTruncated = true
-                }
-            }
-        }
-
-        function onExecutionFinished(executionId, status, exitCode, durationMs, truncated, errorMessage) {
-            if (executionId !== root.executionId) return
-            root.executionStatus = status
-            root.executionExitCode = exitCode
-            root.executionDurationMs = durationMs
-            root.executionTruncated = truncated
-            root.executionError = errorMessage
-        }
-
-        function onThinkingChunk(chunk, requestId) {
-            if (chatModel.count > 0) {
-                let lastIdx = chatModel.count - 1
-                let lastItem = chatModel.get(lastIdx)
-                if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
-                    chatModel.setProperty(lastIdx, "isThinkingActive", true)
-                    let cur = lastItem.thinkingText || ""
-                    let rem = root.maxThinkingChars - cur.length
-                    if (rem > 0) {
-                        let toAdd = chunk.length > rem ? chunk.slice(0, rem) : chunk
-                        chatModel.setProperty(lastIdx, "thinkingText", cur + toAdd)
-                    }
-                    if (chunk.length > rem) {
-                        chatModel.setProperty(lastIdx, "thinkingTruncated", true)
-                    }
-                    chatList.positionViewAtEnd()
-                    return
-                }
-            }
-        }
-
-        function onResponseChunk(chunk, requestId) {
-            if (chatModel.count > 0) {
-                let lastIdx = chatModel.count - 1
-                let lastItem = chatModel.get(lastIdx)
-                if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
-                    chatModel.setProperty(lastIdx, "isThinkingActive", false)
-                    let currentText = lastItem.text || ""
-                    chatModel.setProperty(lastIdx, "text", currentText + chunk)
-                    chatList.positionViewAtEnd()
-                    return
-                }
-            }
-        }
-
-        function onResponseReady(replyText) {
-            if (chatModel.count > 0) {
-                let lastIdx = chatModel.count - 1
-                let lastItem = chatModel.get(lastIdx)
-                if (lastItem.role === "assistant" && !lastItem.isError && lastItem.status !== "completed") {
-                    chatModel.setProperty(lastIdx, "isThinkingActive", false)
-                    chatModel.setProperty(lastIdx, "text", replyText)
-                    chatModel.setProperty(lastIdx, "status", "completed")
-                    Qt.callLater(function() {
-                        chatList.positionViewAtEnd()
-                    })
-                    return
-                }
-            }
-
-            chatModel.append({
-                role: "assistant",
-                text: replyText,
-                status: "completed",
-                isError: false,
-                thinkingText: "",
-                thinkingExpanded: false,
-                isThinkingActive: false,
-                thinkingTruncated: false
-            })
-
-            Qt.callLater(function() {
-                chatList.positionViewAtEnd()
-            })
-        }
-
-        function onResponseInterrupted(partialText, requestId) {
-            if (chatModel.count > 0) {
-                let lastIdx = chatModel.count - 1
-                let lastItem = chatModel.get(lastIdx)
-                if (lastItem.role === "assistant" && (lastItem.status === "pending" || !lastItem.isError)) {
-                    let displayText = partialText && partialText.length > 0 ? partialText : "Request was interrupted. A retry must use a new client_request_id."
-                    chatModel.setProperty(lastIdx, "text", displayText)
-                    chatModel.setProperty(lastIdx, "status", "interrupted")
-                    chatModel.setProperty(lastIdx, "isError", true)
-                    Qt.callLater(function() {
-                        chatList.positionViewAtEnd()
-                    })
-                    return
-                }
-            }
-
-            chatModel.append({
-                role: "assistant",
-                text: partialText && partialText.length > 0 ? partialText : "Request was interrupted. A retry must use a new client_request_id.",
-                status: "interrupted",
-                isError: true
-            })
-
-            Qt.callLater(function() {
-                chatList.positionViewAtEnd()
-            })
-        }
-
-        function onErrorOccurred(errorMessage) {
-            if (chatModel.count > 0) {
-                let lastIdx = chatModel.count - 1
-                let lastItem = chatModel.get(lastIdx)
-                if (lastItem.role === "assistant" && (lastItem.status === "pending" || !lastItem.isError)) {
-                    let errorText = "Error: " + errorMessage
-                    if (lastItem.text && lastItem.text.length > 0) {
-                        errorText = lastItem.text + "\n\n[Error: " + errorMessage + "]"
-                    }
-                    chatModel.setProperty(lastIdx, "text", errorText)
-                    chatModel.setProperty(lastIdx, "status", "failed")
-                    chatModel.setProperty(lastIdx, "isError", true)
-                    Qt.callLater(function() {
-                        chatList.positionViewAtEnd()
-                    })
-                    return
-                }
-            }
-
-            chatModel.append({
-                role: "assistant",
-                text: "Error: " + errorMessage,
-                status: "failed",
-                isError: true
-            })
-
-            Qt.callLater(function() {
-                chatList.positionViewAtEnd()
-            })
-        }
+    }
+    function openReferenceModal(refObj) {
+        if (!refObj) return
+        root.inspectorDocId = refObj.document_id || ""
+        root.inspectorChunkIndex = refObj.chunk_index || 0
+        root.inspectorText = refObj.content || refObj.excerpt || ""
+        sourceInspectorModal.open()
+    }
+    function confirmDeleteConversation(convId, convTitle) { root.pendingDeleteId = convId; root.pendingDeleteTitle = convTitle; deleteDialog.open() }
+    function openDeleteConfirmation(convId, convTitle) { confirmDeleteConversation(convId, convTitle) }
+    function openRenameDialog(convId, convTitle) { root.pendingRenameId = convId; renameInput.text = convTitle; renameDialog.open() }
+    function openInspectorModal() { sourceInspectorModal.open() }
+    function isSourceSelected(docId) { return root.selectedKnowledgeIds.indexOf(docId) !== -1 }
+    function isKnowledgeSelected(docId) { return isSourceSelected(docId) }
+    function toggleKnowledgeSource(docId) {
+        let next = root.selectedKnowledgeIds.slice()
+        const idx = next.indexOf(docId)
+        if (idx === -1) next.push(docId); else next.splice(idx, 1)
+        root.selectedKnowledgeIds = next
+        if (typeof orion !== "undefined" && orion !== null) orion.setConversationSelectedSources(next)
     }
 
     RowLayout {
         anchors.fill: parent
-        anchors.margins: 18
-        spacing: 18
+        spacing: 0
 
-        // ==========================================
-        // Sidebar: Real Conversation Navigator
-        // ==========================================
+        // Left Navigation (208px wide, collapses to 56px icon rail below 1000px)
         Rectangle {
-            Layout.preferredWidth: 250
+            readonly property bool compactRail: root.width < 1000
+            Layout.preferredWidth: compactRail ? 56 : 208
             Layout.fillHeight: true
-
-            radius: 22
-            color: "#E8E5DA"
-
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 20
-                spacing: 14
-
-                // App Brand
-                RowLayout {
-                    spacing: 12
-
-                    Rectangle {
-                        Layout.preferredWidth: 36
-                        Layout.preferredHeight: 36
-                        radius: 11
-                        color: "#526D5B"
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "O"
-                            color: "white"
-                            font.pixelSize: 21
-                            font.bold: true
-                        }
-                    }
-
-                    ColumnLayout {
-                        spacing: 0
-
-                        Text {
-                            text: "ORION"
-                            font.pixelSize: 18
-                            font.bold: true
-                            color: "#303A32"
-                        }
-
-                        Text {
-                            text: "PERSONAL ASSISTANT"
-                            font.pixelSize: 8
-                            font.letterSpacing: 1.2
-                            color: "#74796E"
-                        }
-                    }
-                }
-
-                // New Chat Button
-                Button {
-                    id: newChatButton
-                    objectName: "newChatButton"
-                    Layout.fillWidth: true
-                    implicitHeight: 38
-                    enabled: !root.busy
-
-                    onClicked: {
-                        if (typeof orion !== "undefined" && orion !== null) {
-                            orion.createNewConversation()
-                        }
-                    }
-
-                    background: Rectangle {
-                        radius: 10
-                        color: !newChatButton.enabled
-                               ? "#B8BFB6"
-                               : (newChatButton.down ? "#3C5547" : "#526D5B")
-                    }
-
-                    contentItem: RowLayout {
-                        spacing: 8
-                        Item { Layout.fillWidth: true }
-                        Text {
-                            text: "+  New Chat"
-                            color: "white"
-                            font.pixelSize: 13
-                            font.bold: true
-                        }
-                        Item { Layout.fillWidth: true }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: "#D3D0C5"
-                }
-
-                // Section title
-                Text {
-                    text: "CONVERSATIONS"
-                    font.pixelSize: 10
-                    font.bold: true
-                    font.letterSpacing: 1.5
-                    color: "#85877C"
-                }
-
-                // Scrollable Conversation List
-                ListView {
-                    id: convList
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    spacing: 4
-                    model: conversationsModel
-
-                    delegate: Rectangle {
-                        id: convItem
-                        width: convList.width
-                        height: 38
-                        radius: 9
-
-                        readonly property bool isSelected: model.id === root.activeConversationId
-                        readonly property bool isHovered: itemMouseArea.containsMouse
-
-                        color: isSelected ? "#D9E0D5" : (isHovered ? "#E1DDD2" : "transparent")
-                        border.width: isSelected ? 1 : 0
-                        border.color: isSelected ? "#C6CEBF" : "transparent"
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 10
-                            anchors.rightMargin: 8
-                            spacing: 8
-
-                            Text {
-                                text: "💬"
-                                font.pixelSize: 12
-                                opacity: isSelected ? 0.9 : 0.5
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: model.title
-                                elide: Text.ElideRight
-                                font.pixelSize: 13
-                                font.bold: isSelected
-                                color: isSelected ? "#2E3B30" : "#555A51"
-                            }
-
-                            // Delete button (visible on hover or when selected)
-                            Rectangle {
-                                id: deleteBtn
-                                width: 22
-                                height: 22
-                                radius: 6
-                                visible: isHovered || isSelected
-                                color: deleteMouseArea.containsMouse ? "#FCE8E6" : "transparent"
-
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: "✕"
-                                    font.pixelSize: 11
-                                    color: deleteMouseArea.containsMouse ? "#C53929" : "#898B80"
-                                }
-
-                                MouseArea {
-                                    id: deleteMouseArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    enabled: !root.busy
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        root.openDeleteConfirmation(model.id, model.title)
-                                    }
-                                }
-                            }
-                        }
-
-                        MouseArea {
-                            id: itemMouseArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            enabled: !root.busy
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (model.id !== root.activeConversationId) {
-                                    orion.selectConversation(model.id)
-                                }
-                            }
-                        }
-                    }
-
-                    // Empty state when no conversations exist
-                    Text {
-                        anchors.centerIn: parent
-                        text: "No conversations yet"
-                        font.pixelSize: 12
-                        color: "#9C9E94"
-                        visible: conversationsModel.count === 0 && !root.isInitializing
-                    }
-
-                    ScrollBar.vertical: ScrollBar {
-                        policy: ScrollBar.AsNeeded
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: "#D3D0C5"
-                }
-
-                Text {
-                    text: "SYSTEM STATUS"
-                    font.pixelSize: 10
-                    font.bold: true
-                    font.letterSpacing: 1.2
-                    color: "#85877C"
-                }
-
-                RowLayout {
-                    spacing: 8
-
-                    Rectangle {
-                        width: 8
-                        height: 8
-                        radius: 4
-                        color: root.busy ? "#D48B38" : "#77936F"
-                    }
-
-                    Text {
-                        text: root.busy ? "Processing request..." : "Desktop core online"
-                        color: root.busy ? "#8A5B28" : "#53654F"
-                        font.pixelSize: 12
-                    }
-                }
-
-                Text {
-                    text: root.busy ? "Model: Generating (Simulated)..." : "Model: Simulated (FakeModel)"
-                    color: "#85877C"
-                    font.pixelSize: 11
-                }
-            }
-        }
-
-        // ==========================================
-        // Main Workspace: Chat Panel & Input
-        // ==========================================
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-
-            radius: 22
-            color: "#FCFBF8"
+            color: Theme.sidebar
             border.width: 1
-            border.color: "#EAE7DF"
+            border.color: Theme.hairline
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 26
-                spacing: 16
-
-                // Header
-                RowLayout {
-                    Layout.fillWidth: true
-
-                    ColumnLayout {
-                        spacing: 4
-
-                        Text {
-                            text: root.getActiveTitle()
-                            font.pixelSize: 22
-                            font.bold: true
-                            color: "#303A32"
-                            elide: Text.ElideRight
-                        }
-
-                        Text {
-                            text: root.activeConversationId ? "Active persistent session" : "Start a new conversation"
-                            font.pixelSize: 12
-                            color: "#898B80"
-                        }
-                    }
-
-                    Item {
-                        Layout.fillWidth: true
-                    }
-
-                    Rectangle {
-                        width: root.busy ? 118 : 105
-                        height: 30
-                        radius: 15
-                        color: root.busy ? "#F6EEDD" : "#E6ECE3"
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: root.busy ? "THINKING..." : "CORE ONLINE"
-                            font.pixelSize: 10
-                            font.bold: true
-                            color: root.busy ? "#8A5B28" : "#526D5B"
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 1
-                    color: "#ECEAE3"
-                }
-
-                // Message Area (Loading, Empty, or Message List)
-                Item {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-
-                    // 1. Initial Loading State
-                    ColumnLayout {
-                        anchors.centerIn: parent
-                        spacing: 12
-                        visible: root.isInitializing
-
-                        Rectangle {
-                            Layout.alignment: Qt.AlignHCenter
-                            width: 36
-                            height: 36
-                            radius: 18
-                            color: "#EAE7DF"
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "⏳"
-                                font.pixelSize: 16
-                            }
-                        }
-
-                        Text {
-                            Layout.alignment: Qt.AlignHCenter
-                            text: "Loading conversations..."
-                            color: "#898B80"
-                            font.pixelSize: 14
-                        }
-                    }
-
-                    // 2. Empty Workspace State (No active messages)
-                    ColumnLayout {
-                        anchors.centerIn: parent
-                        spacing: 14
-                        visible: !root.isInitializing && chatModel.count === 0
-
-                        Rectangle {
-                            Layout.alignment: Qt.AlignHCenter
-                            width: 48
-                            height: 48
-                            radius: 24
-                            color: "#E8EFE5"
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "✦"
-                                font.pixelSize: 22
-                                color: "#526D5B"
-                            }
-                        }
-
-                        Text {
-                            Layout.alignment: Qt.AlignHCenter
-                            text: "How can I help you today?"
-                            font.pixelSize: 19
-                            font.bold: true
-                            color: "#303A32"
-                        }
-
-                        Text {
-                            Layout.alignment: Qt.AlignHCenter
-                            text: "Type a message below or start a new conversation."
-                            font.pixelSize: 13
-                            color: "#898B80"
-                        }
-                    }
-
-                    // 3. Active Chat ListView
-                    ListView {
-                        id: chatList
-                        anchors.fill: parent
-                        clip: true
-                        spacing: 12
-                        model: chatModel
-                        visible: !root.isInitializing && chatModel.count > 0
-
-                        delegate: Item {
-                            width: chatList.width
-                            height: bubble.height + 8
-
-                            Row {
-                                width: parent.width
-                                layoutDirection: model.role === "user"
-                                                 ? Qt.RightToLeft
-                                                 : Qt.LeftToRight
-
-                                Rectangle {
-                                    id: bubble
-
-                                    width: Math.min(
-                                        chatList.width * 0.78,
-                                        Math.max(120, bubbleContent.implicitWidth + 34)
-                                    )
-                                    height: bubbleContent.implicitHeight + 24
-                                    radius: 15
-
-                                    color: {
-                                        if (model.status === "failed") return "#FCE8E6"
-                                        if (model.status === "interrupted") return "#FFF3E0"
-                                        return model.role === "user" ? "#E4EAE1" : "#F0EEE8"
-                                    }
-                                    border.width: model.isError ? 1 : 0
-                                    border.color: {
-                                        if (model.status === "failed") return "#E5A9A4"
-                                        if (model.status === "interrupted") return "#FFE0B2"
-                                        return "transparent"
-                                    }
-
-                                    ColumnLayout {
-                                        id: bubbleContent
-                                        x: 17
-                                        y: 12
-                                        width: Math.min(implicitWidth, chatList.width * 0.78 - 34)
-                                        spacing: 4
-
-                                        // Status badge for failed or interrupted messages
-                                        Text {
-                                            visible: model.isError
-                                            text: model.status === "interrupted" ? "INTERRUPTED" : "FAILED"
-                                            font.pixelSize: 10
-                                            font.bold: true
-                                            color: model.status === "interrupted" ? "#D97706" : "#C53929"
-                                        }
-
-                                        // Collapsible Thinking Trace section (subordinate, plain-text only)
-                                        ColumnLayout {
-                                            visible: model.role === "assistant" && ((model.thinkingText && model.thinkingText.length > 0) || model.isThinkingActive)
-                                            Layout.fillWidth: true
-                                            spacing: 4
-
-                                            Rectangle {
-                                                id: thinkingToggleHeader
-                                                objectName: "thinkingToggleHeader"
-                                                Layout.fillWidth: true
-                                                implicitHeight: 26
-                                                radius: 8
-                                                color: "#E7E4DC"
-
-                                                RowLayout {
-                                                    anchors.fill: parent
-                                                    anchors.leftMargin: 8
-                                                    anchors.rightMargin: 8
-                                                    spacing: 6
-
-                                                    Text {
-                                                        text: model.thinkingExpanded ? "▾" : "▸"
-                                                        font.pixelSize: 11
-                                                        color: "#6B7065"
-                                                        textFormat: Text.PlainText
-                                                    }
-
-                                                    Text {
-                                                        text: model.isThinkingActive ? "Thinking..." : "Thinking"
-                                                        font.pixelSize: 11
-                                                        font.bold: true
-                                                        color: "#5E6458"
-                                                        textFormat: Text.PlainText
-                                                    }
-
-                                                    Text {
-                                                        visible: model.thinkingTruncated
-                                                        text: "(truncated)"
-                                                        font.pixelSize: 10
-                                                        color: "#B45309"
-                                                        textFormat: Text.PlainText
-                                                    }
-
-                                                    Item { Layout.fillWidth: true }
-                                                }
-
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    onClicked: {
-                                                        chatModel.setProperty(index, "thinkingExpanded", !model.thinkingExpanded)
-                                                    }
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                visible: model.thinkingExpanded
-                                                Layout.fillWidth: true
-                                                implicitHeight: Math.min(180, thinkingPlainText.implicitHeight + 14)
-                                                radius: 8
-                                                color: "#E9E6DE"
-                                                border.width: 1
-                                                border.color: "#DCD8CE"
-
-                                                ScrollView {
-                                                    anchors.fill: parent
-                                                    anchors.margins: 7
-                                                    clip: true
-                                                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
-
-                                                    Text {
-                                                        id: thinkingPlainText
-                                                        objectName: "thinkingPlainText"
-                                                        width: parent.width
-                                                        text: model.thinkingText || ""
-                                                        wrapMode: Text.Wrap
-                                                        textFormat: Text.PlainText
-                                                        font.pixelSize: 12
-                                                        color: "#5A5F55"
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        Text {
-                                            id: bubbleText
-                                            Layout.fillWidth: true
-                                            text: (model.status === "pending" && (!model.text || model.text.length === 0)) ? "..." : model.text
-                                            opacity: (model.status === "pending" && (!model.text || model.text.length === 0)) ? 0.6 : 1.0
-                                            wrapMode: Text.Wrap
-                                            color: {
-                                                if (model.status === "failed") return "#9C2B27"
-                                                if (model.status === "interrupted") return "#92400E"
-                                                return "#384139"
-                                            }
-                                            font.pixelSize: 14
-                                            lineHeight: 1.35
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        ScrollBar.vertical: ScrollBar {
-                            policy: ScrollBar.AsNeeded
-                        }
-                    }
-                }
-
-                // Thinking trace toggle bar
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-
-                    CheckBox {
-                        id: showThinkingToggle
-                        objectName: "showThinkingToggle"
-                        checked: root.showThinking
-                        enabled: root.thinkingSupported
-                        text: root.thinkingSupported ? "Show thinking" : "Show thinking (unavailable)"
-                        font.pixelSize: 12
-                        onToggled: {
-                            if (typeof orion !== "undefined" && orion !== null) {
-                                orion.setShowThinking(checked)
-                            }
-                        }
-                    }
-
-                    Item { Layout.fillWidth: true }
-                }
-
-                // Message composer
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 62
-
-                    radius: 16
-                    color: root.busy ? "#EBE9E3" : "#F2F0EA"
-                    border.width: 1
-                    border.color: "#E6E3D9"
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 15
-                        anchors.rightMargin: 9
-                        spacing: 10
-
-                        TextField {
-                            id: composer
-                            objectName: "composer"
-
-                            Layout.fillWidth: true
-                            enabled: !root.busy
-
-                            placeholderText: root.busy ? "ORION is generating a response..." : "Message ORION..."
-                            placeholderTextColor: "#999B90"
-
-                            color: "#303A32"
-                            font.pixelSize: 14
-
-                            background: Rectangle {
-                                color: "transparent"
-                            }
-
-                            selectByMouse: true
-                            onAccepted: root.sendMessage()
-                        }
-
-                        Button {
-                            id: stopButton
-                            objectName: "stopButton"
-
-                            visible: root.busy
-                            enabled: root.busy
-                            text: "Stop"
-                            implicitWidth: 76
-                            implicitHeight: 42
-
-                            onClicked: {
-                                if (typeof orion !== "undefined" && orion !== null) {
-                                    orion.stopGeneration()
-                                }
-                            }
-
-                            background: Rectangle {
-                                radius: 12
-                                color: stopButton.down ? "#8A3828" : "#C53929"
-                            }
-
-                            contentItem: Text {
-                                text: stopButton.text
-                                color: "white"
-                                font.pixelSize: 13
-                                font.bold: true
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-
-                        Button {
-                            id: sendButton
-                            objectName: "sendButton"
-
-                            visible: !root.busy
-                            enabled: !root.busy && composer.text.trim().length > 0
-                            text: "Send"
-                            implicitWidth: 76
-                            implicitHeight: 42
-
-                            onClicked: root.sendMessage()
-
-                            background: Rectangle {
-                                radius: 12
-                                color: !sendButton.enabled
-                                       ? "#A4B0A7"
-                                       : (sendButton.down ? "#3C5547" : "#526D5B")
-                            }
-
-                            contentItem: Text {
-                                text: sendButton.text
-                                color: "white"
-                                font.pixelSize: 13
-                                font.bold: true
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                        }
-                    }
-                }
+                anchors.margins: Theme.spaceMd
+                spacing: Theme.spaceXs
 
                 Text {
+                    Layout.bottomMargin: Theme.spaceMd
+                    text: parent.parent.compactRail ? "O" : "ORION"
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontHeading
+                    font.weight: Font.Medium
+                    color: Theme.text
+                    horizontalAlignment: parent.parent.compactRail ? Text.AlignHCenter : Text.AlignLeft
                     Layout.fillWidth: true
-                    text: "ORION is running locally in simulated mode. Local AI model integration is the next milestone."
-                    color: "#A0A094"
-                    font.pixelSize: 10
-                    horizontalAlignment: Text.AlignHCenter
-                }
-            }
-        }
-    }
-
-    // ==========================================
-    // Delete Confirmation Modal Dialog
-    // ==========================================
-    Rectangle {
-        id: deleteDialog
-        objectName: "deleteDialog"
-        visible: false
-        anchors.fill: parent
-        color: "#66000000"
-        z: 999
-
-        // Consume mouse clicks outside dialog card
-        MouseArea {
-            anchors.fill: parent
-            onClicked: {}
-        }
-
-        Rectangle {
-            width: 380
-            height: 180
-            radius: 18
-            color: "#FCFBF8"
-            anchors.centerIn: parent
-
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 22
-                spacing: 14
-
-                Text {
-                    text: "Delete Conversation"
-                    font.pixelSize: 17
-                    font.bold: true
-                    color: "#303A32"
-                }
-
-                Text {
-                    Layout.fillWidth: true
-                    text: "Are you sure you want to delete \"" + root.pendingDeleteTitle + "\"? All messages in this conversation will be permanently removed."
-                    font.pixelSize: 13
-                    color: "#666B62"
-                    wrapMode: Text.Wrap
-                }
-
-                Item {
-                    Layout.fillHeight: true
-                }
-
-                RowLayout {
-                    Layout.alignment: Qt.AlignRight
-                    spacing: 10
-
-                    Button {
-                        text: "Cancel"
-                        implicitWidth: 80
-                        implicitHeight: 36
-                        onClicked: {
-                            deleteDialog.visible = false
-                        }
-
-                        background: Rectangle {
-                            radius: 9
-                            color: "#EBE8DF"
-                        }
-
-                        contentItem: Text {
-                            text: "Cancel"
-                            color: "#4A5247"
-                            font.pixelSize: 13
-                            font.bold: true
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-
-                    Button {
-                        text: "Delete"
-                        implicitWidth: 80
-                        implicitHeight: 36
-                        onClicked: {
-                            deleteDialog.visible = false
-                            if (typeof orion !== "undefined" && orion !== null) {
-                                orion.deleteConversation(root.pendingDeleteId)
-                            }
-                        }
-
-                        background: Rectangle {
-                            radius: 9
-                            color: "#D9534F"
-                        }
-
-                        contentItem: Text {
-                            text: "Delete"
-                            color: "white"
-                            font.pixelSize: 13
-                            font.bold: true
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // ==========================================
-    // Tool Execution Approval Modal Dialog
-    // ==========================================
-    Timer {
-        id: approvalTimer
-        interval: 1000
-        repeat: true
-        running: pendingApprovalsModel.count > 0
-        onTriggered: {
-            if (root.approvalRemainingSeconds > 0) {
-                root.approvalRemainingSeconds -= 1
-            }
-        }
-    }
-
-    Rectangle {
-        id: approvalDialog
-        objectName: "approvalDialog"
-        visible: pendingApprovalsModel.count > 0
-        anchors.fill: parent
-        color: "#66000000"
-        z: 1000
-
-        // Consume mouse clicks outside dialog card
-        MouseArea {
-            anchors.fill: parent
-            onClicked: {}
-        }
-
-        readonly property var currentApproval: pendingApprovalsModel.count > 0 ? pendingApprovalsModel.get(0) : null
-        readonly property string currentApprovalId: currentApproval ? currentApproval.approval_id : ""
-        readonly property string currentNonce: currentApproval ? currentApproval.nonce : ""
-        readonly property bool isMutating: currentApproval ? currentApproval.is_mutating : false
-        readonly property bool isExpired: root.approvalRemainingSeconds <= 0
-
-        Rectangle {
-            width: Math.min(parent.width - 40, 520)
-            implicitHeight: approvalContentColumn.implicitHeight + 40
-            radius: 18
-            color: "#FCFBF8"
-            anchors.centerIn: parent
-
-            ColumnLayout {
-                id: approvalContentColumn
-                anchors.fill: parent
-                anchors.margins: 20
-                spacing: 12
-
-                // Header with Title and Mutating Badge
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-
-                    Text {
-                        text: "Action Approval Required"
-                        font.pixelSize: 17
-                        font.bold: true
-                        color: "#303A32"
-                        textFormat: Text.PlainText
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    // Mutating Badge
-                    Rectangle {
-                        implicitWidth: mutatingLabel.implicitWidth + 12
-                        implicitHeight: 22
-                        radius: 6
-                        color: approvalDialog.isMutating ? "#FBEAE8" : "#EBF3EE"
-                        border.color: approvalDialog.isMutating ? "#D9534F" : "#526D5B"
-                        border.width: 1
-
-                        Text {
-                            id: mutatingLabel
-                            anchors.centerIn: parent
-                            text: approvalDialog.isMutating ? "MUTATING" : "READ-ONLY"
-                            font.pixelSize: 10
-                            font.bold: true
-                            color: approvalDialog.isMutating ? "#D9534F" : "#526D5B"
-                            textFormat: Text.PlainText
-                        }
-                    }
-                }
-
-                // Multiple approvals indicator if count > 1
-                Text {
-                    visible: pendingApprovalsModel.count > 1
-                    Layout.fillWidth: true
-                    text: "Pending approval 1 of " + pendingApprovalsModel.count
-                    font.pixelSize: 11
-                    color: "#88887E"
                     textFormat: Text.PlainText
                 }
 
-                // Tool Name and Description
-                ColumnLayout {
+                OrionListRow {
+                    objectName: "navHomeButton"
                     Layout.fillWidth: true
-                    spacing: 4
-
-                    Text {
-                        id: toolNameText
-                        objectName: "toolNameText"
-                        Layout.fillWidth: true
-                        text: approvalDialog.currentApproval ? approvalDialog.currentApproval.tool_name : ""
-                        font.pixelSize: 14
-                        font.bold: true
-                        color: "#2C342E"
-                        textFormat: Text.PlainText
-                    }
-
-                    Text {
-                        id: actionSummaryText
-                        objectName: "actionSummaryText"
-                        Layout.fillWidth: true
-                        text: approvalDialog.currentApproval ? approvalDialog.currentApproval.action_summary : ""
-                        font.pixelSize: 12
-                        color: "#5B6358"
-                        wrapMode: Text.Wrap
-                        textFormat: Text.PlainText
-                    }
+                    title: parent.parent.compactRail ? "H" : "Home"
+                    selected: root.activePage === "home"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Home"
+                    onClicked: root.activePage = "home"
                 }
-
-                // Arguments Preview
-                Text {
-                    text: "Validated Arguments:"
-                    font.pixelSize: 12
-                    font.bold: true
-                    color: "#4A5247"
-                    textFormat: Text.PlainText
-                }
-
-                Rectangle {
+                OrionListRow {
+                    objectName: "navChatButton"
                     Layout.fillWidth: true
-                    implicitHeight: Math.min(argsText.implicitHeight + 16, 120)
-                    color: "#F4F1E9"
-                    radius: 8
-                    border.color: "#E0DDD3"
-                    border.width: 1
-                    clip: true
-
-                    ScrollView {
-                        anchors.fill: parent
-                        anchors.margins: 8
-
-                        Text {
-                            id: argsText
-                            objectName: "argsText"
-                            width: parent.width
-                            text: approvalDialog.currentApproval ? JSON.stringify(approvalDialog.currentApproval.arguments, null, 2) : "{}"
-                            font.family: "Monospace"
-                            font.pixelSize: 11
-                            color: "#303A32"
-                            wrapMode: Text.WrapAnywhere
-                            textFormat: Text.PlainText
-                        }
-                    }
+                    title: parent.parent.compactRail ? "C" : "Chat"
+                    selected: root.activePage === "chat"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Chat"
+                    onClicked: root.activePage = "chat"
                 }
-
-                // Expiration Countdown
-                RowLayout {
+                OrionListRow {
+                    objectName: "knowledgeToggleButton"
                     Layout.fillWidth: true
-                    spacing: 6
-
-                    Text {
-                        id: countdownLabel
-                        objectName: "countdownLabel"
-                        text: approvalDialog.isExpired ? "Approval expired (60s limit)" : "Expires in " + root.approvalRemainingSeconds + "s"
-                        font.pixelSize: 12
-                        font.bold: approvalDialog.isExpired
-                        color: approvalDialog.isExpired ? "#D9534F" : "#74796E"
-                        textFormat: Text.PlainText
-                    }
+                    title: parent.parent.compactRail ? "K" : "Knowledge"
+                    selected: root.activePage === "knowledge"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Knowledge"
+                    onClicked: root.activePage = "knowledge"
+                }
+                OrionListRow {
+                    objectName: "workspaceBrowserToggleButton"
+                    Layout.fillWidth: true
+                    title: parent.parent.compactRail ? "W" : "Workspace"
+                    selected: root.activePage === "workspace"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Workspace"
+                    onClicked: root.activePage = "workspace"
+                }
+                OrionListRow {
+                    objectName: "navProductivityButton"
+                    Layout.fillWidth: true
+                    title: parent.parent.compactRail ? "P" : "Productivity"
+                    selected: root.activePage === "productivity"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Productivity"
+                    onClicked: root.activePage = "productivity"
                 }
 
                 Item { Layout.fillHeight: true }
 
-                // Actions: Reject and Approve Once
+                OrionListRow {
+                    objectName: "navSettingsButton"
+                    Layout.fillWidth: true
+                    title: parent.parent.compactRail ? "S" : "Settings"
+                    selected: root.activePage === "settings"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Settings"
+                    onClicked: root.activePage = "settings"
+                }
+
                 RowLayout {
-                    Layout.alignment: Qt.AlignRight
-                    spacing: 10
-
-                    Button {
-                        id: rejectButton
-                        objectName: "approvalRejectButton"
-                        text: "Reject"
-                        implicitWidth: 90
-                        implicitHeight: 36
+                    visible: !parent.parent.compactRail
+                    Layout.fillWidth: true
+                    spacing: Theme.spaceXs
+                    OrionButton {
+                        objectName: "sessionLockButton"
+                        Layout.fillWidth: true
+                        compact: true
+                        variant: root.sessionState === "unlocked" ? "secondary" : "primary"
+                        text: root.sessionState === "unlocked" ? "Lock" : "Unlock"
                         onClicked: {
-                            if (typeof orion !== "undefined" && orion !== null) {
-                                orion.submitApprovalDecision(
-                                    approvalDialog.currentApprovalId,
-                                    approvalDialog.currentNonce,
-                                    false
-                                )
-                            }
-                        }
-
-                        background: Rectangle {
-                            radius: 9
-                            color: "#EBE8DF"
-                        }
-
-                        contentItem: Text {
-                            text: "Reject"
-                            color: "#4A5247"
-                            font.pixelSize: 13
-                            font.bold: true
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
+                            if (typeof orion !== "undefined" && orion !== null)
+                                orion.toggleSessionLock()
                         }
                     }
-
-                    Button {
-                        id: approveButton
-                        objectName: "approvalApproveButton"
-                        text: "Approve Once"
-                        implicitWidth: 120
-                        implicitHeight: 36
-                        enabled: !approvalDialog.isExpired && approvalDialog.currentApprovalId.length > 0
-                        opacity: enabled ? 1.0 : 0.5
+                    OrionButton {
+                        objectName: "hideToBackgroundButton"
+                        compact: true
+                        variant: "quiet"
+                        text: "Orb"
                         onClicked: {
-                            if (typeof orion !== "undefined" && orion !== null) {
-                                orion.submitApprovalDecision(
-                                    approvalDialog.currentApprovalId,
-                                    approvalDialog.currentNonce,
-                                    true
-                                )
-                            }
-                        }
-
-                        background: Rectangle {
-                            radius: 9
-                            color: approveButton.enabled ? "#526D5B" : "#A0A094"
-                        }
-
-                        contentItem: Text {
-                            text: "Approve Once"
-                            color: "white"
-                            font.pixelSize: 13
-                            font.bold: true
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
+                            if (typeof orion !== "undefined" && orion !== null)
+                                orion.setBackgroundMode(true)
                         }
                     }
                 }
+
+                ColumnLayout {
+                    visible: !parent.parent.compactRail
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.spaceSm
+                    spacing: 2
+                    Text {
+                        id: providerStatusText
+                        objectName: "providerStatusText"
+                        Layout.fillWidth: true
+                        text: root.providerDisplay
+                        font.pixelSize: Theme.fontCaption
+                        font.weight: Font.Medium
+                        color: Theme.textSecondary
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                    }
+                    Text {
+                        id: providerFooterText
+                        objectName: "providerFooterText"
+                        Layout.fillWidth: true
+                        text: root.isSimulatedProvider ? "Simulation Mode" : "Local inference"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textSecondary
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                    }
+                }
             }
+        }
+
+        // Main Content Stack
+        StackLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            currentIndex: ["home", "chat", "knowledge", "workspace", "productivity", "settings"].indexOf(root.activePage)
+
+            HomePage { root: root }
+            ChatPage { id: chatPage; root: root; chatModel: chatModel; conversationsModel: conversationsModel; knowledgeSourcesModel: knowledgeSourcesModel }
+            KnowledgePage { objectName: "knowledgePanel"; root: root; theme: Theme; knowledgeSourcesModel: knowledgeSourcesModel }
+            WorkspacePage { objectName: "workspaceBrowserPanel"; root: root; theme: Theme; workspaceEntriesModel: workspaceEntriesModel }
+            ProductivityPage { root: root }
+            SettingsPage { root: root }
         }
     }
 
-    // ==========================================
-    // Execution Display Drawer
-    // ==========================================
-    Rectangle {
-        id: executionDrawer
-        objectName: "executionDrawer"
-        visible: root.executionPanelVisible
-        anchors {
-            left: parent.left
-            right: parent.right
-            bottom: parent.bottom
-            margins: 18
+    Dialog {
+        id: deleteDialog
+        objectName: "deleteDialog"
+        title: "Delete conversation"
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Yes | Dialog.No
+        onAccepted: if (root.pendingDeleteId) orion.deleteConversation(root.pendingDeleteId)
+        Text { text: "Delete \"" + root.pendingDeleteTitle + "\"?"; color: Theme.text; textFormat: Text.PlainText }
+    }
+
+    Dialog {
+        id: renameDialog
+        title: "Rename conversation"
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: if (root.pendingRenameId && renameInput.text.trim()) orion.renameConversation(root.pendingRenameId, renameInput.text.trim())
+        OrionTextField { id: renameInput; implicitWidth: 280; placeholderText: "Conversation title" }
+    }
+
+    Dialog {
+        id: sourceInspectorModal
+        title: "Passage Context"
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(root.width * 0.7, 640)
+        standardButtons: Dialog.Close
+        ScrollView {
+            implicitHeight: 280
+            TextArea { readOnly: true; wrapMode: TextEdit.Wrap; text: root.inspectorText; color: Theme.text; background: null }
         }
-        height: Math.min(360, parent.height * 0.45)
-        z: 500
+    }
 
-        radius: 16
-        color: "#FCFBF8"
-        border.width: 1
-        border.color: "#D6D3CA"
+    OrionApprovalDialog {
+        root: root
+        pendingApprovalsModel: pendingApprovalsModel
+    }
 
-        Column {
+    OrionExecutionDrawer {
+        root: root
+    }
+
+    Window {
+        id: orionOrbWindow
+        objectName: "orionOrbWindow"
+        visible: root.backgroundMode && !root.orbHidden
+        width: 72
+        height: 72
+        flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        color: "transparent"
+        title: "ORION Orb"
+
+        Rectangle {
             anchors.fill: parent
-            anchors.margins: 14
-            spacing: 8
+            radius: 36
+            color: root.sessionState === "unlocked" ? Theme.accent : Theme.surface
+            border.width: 2
+            border.color: Theme.hairline
 
-            // Header row
-            Row {
-                width: parent.width
-                spacing: 8
-
-                Text {
-                    text: "Subprocess Execution"
-                    font.pixelSize: 13
-                    font.bold: true
-                    color: "#303A32"
-                    textFormat: Text.PlainText
-                    verticalAlignment: Text.AlignVCenter
-                    height: 28
-                }
-
-                // Status badge
-                Rectangle {
-                    width: statusBadge.implicitWidth + 12
-                    height: 22
-                    radius: 5
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: {
-                        const s = root.executionStatus
-                        if (s === "running") return "#F6EEDD"
-                        if (s === "completed") return "#EBF3EE"
-                        if (s === "cancelled") return "#F6F0E0"
-                        if (s === "timed_out") return "#FEF3C7"
-                        return "#FBEAE8"
-                    }
-                    border.color: {
-                        const s = root.executionStatus
-                        if (s === "running") return "#C9A74E"
-                        if (s === "completed") return "#526D5B"
-                        if (s === "cancelled") return "#A08040"
-                        if (s === "timed_out") return "#D97706"
-                        return "#D9534F"
-                    }
-                    border.width: 1
-
-                    Text {
-                        id: statusBadge
-                        anchors.centerIn: parent
-                        text: root.executionStatus.toUpperCase()
-                        font.pixelSize: 10
-                        font.bold: true
-                        color: {
-                            const s = root.executionStatus
-                            if (s === "running") return "#C9A74E"
-                            if (s === "completed") return "#526D5B"
-                            if (s === "cancelled") return "#A08040"
-                            if (s === "timed_out") return "#D97706"
-                            return "#D9534F"
-                        }
-                        textFormat: Text.PlainText
-                    }
-                }
-
-                // Truncation badge
-                Rectangle {
-                    visible: root.executionTruncated
-                    width: truncLabel.implicitWidth + 12
-                    height: 22
-                    radius: 5
-                    anchors.verticalCenter: parent.verticalCenter
-                    color: "#FBEAE8"
-                    border.color: "#D9534F"
-                    border.width: 1
-                    Text {
-                        id: truncLabel
-                        anchors.centerIn: parent
-                        text: "TRUNCATED"
-                        font.pixelSize: 10
-                        font.bold: true
-                        color: "#D9534F"
-                        textFormat: Text.PlainText
-                    }
-                }
-
-                Item { width: parent.width - 220; height: 1 }
-
-                // Duration / live elapsed label
-                Text {
-                    visible: root.executionStatus === "running" || root.executionDurationMs > 0
-                    text: root.executionStatus === "running"
-                        ? (root.executionElapsedMs / 1000).toFixed(1) + "s"
-                        : (root.executionDurationMs / 1000).toFixed(2) + "s"
-                    font.pixelSize: 11
-                    color: "#889080"
-                    textFormat: Text.PlainText
-                    verticalAlignment: Text.AlignVCenter
-                    height: 28
-                }
-
-                // Cancel button (only shown while running)
-                Rectangle {
-                    id: stopExecutionButton
-                    objectName: "stopExecutionButton"
-                    visible: root.executionStatus === "running"
-                    enabled: root.executionStatus === "running" && root.executionId !== ""
-                    width: cancelExecBtn.implicitWidth + 20
-                    height: 26
-                    radius: 8
-                    color: "#FBEAE8"
-                    border.color: "#D9534F"
-                    border.width: 1
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    Text {
-                        id: cancelExecBtn
-                        anchors.centerIn: parent
-                        text: "Stop"
-                        font.pixelSize: 11
-                        font.bold: true
-                        color: "#D9534F"
-                        textFormat: Text.PlainText
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        enabled: stopExecutionButton.enabled
-                        onClicked: {
-                            if (typeof orion !== "undefined" && orion !== null && root.executionId !== "") {
-                                orion.cancelExecution(root.executionId)
-                            }
-                        }
-                    }
-                }
-
-                // Dismiss button
-                Rectangle {
-                    id: dismissExecutionButton
-                    objectName: "dismissExecutionButton"
-                    visible: root.executionStatus !== "running"
-                    width: dismissBtn.implicitWidth + 20
-                    height: 26
-                    radius: 8
-                    color: "#EBE9E3"
-                    border.color: "#CCC9C0"
-                    border.width: 1
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    Text {
-                        id: dismissBtn
-                        anchors.centerIn: parent
-                        text: "Dismiss"
-                        font.pixelSize: 11
-                        color: "#666860"
-                        textFormat: Text.PlainText
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        onClicked: {
-                            root.executionPanelVisible = false
-                            root.executionId = ""
-                        }
-                    }
-                }
-            }
-
-            // Command line display
             Text {
-                width: parent.width
-                text: root.executionCommand + (root.executionArgs.length > 0 ? " " + root.executionArgs.join(" ") : "")
-                font.pixelSize: 11
-                font.family: "monospace"
-                color: "#555750"
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-            }
-
-            // CWD
-            Text {
-                width: parent.width
-                text: "cwd: " + root.executionCwd
-                font.pixelSize: 10
-                color: "#888B80"
-                textFormat: Text.PlainText
-                elide: Text.ElideLeft
-            }
-
-            // Error message
-            Text {
-                visible: root.executionError !== "" && root.executionStatus !== "running"
-                width: parent.width
-                text: root.executionError
-                font.pixelSize: 11
-                color: "#D9534F"
-                wrapMode: Text.WordWrap
+                anchors.centerIn: parent
+                text: root.sessionState === "unlocked" ? "ORION" : "LOCK"
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontCaption
+                font.weight: Font.DemiBold
+                color: root.sessionState === "unlocked" ? "#FFFFFF" : Theme.text
                 textFormat: Text.PlainText
             }
 
-            // stdout / stderr split
-            Row {
-                width: parent.width
-                height: executionDrawer.height - 130
-                spacing: 8
-
-                // stdout
-                Rectangle {
-                    width: (parent.width - 8) / 2
-                    height: parent.height
-                    radius: 8
-                    color: "#F4F2EB"
-                    border.width: 1
-                    border.color: "#E0DDD5"
-
-                    Column {
-                        anchors.fill: parent
-                        anchors.margins: 6
-                        spacing: 4
-
-                        Text {
-                            text: "stdout"
-                            font.pixelSize: 10
-                            font.bold: true
-                            color: "#7A7E70"
-                            textFormat: Text.PlainText
-                        }
-
-                        ScrollView {
-                            width: parent.width
-                            height: parent.height - 20
-                            clip: true
-                            ScrollBar.vertical.policy: ScrollBar.AsNeeded
-                            ScrollBar.horizontal.policy: ScrollBar.AsNeeded
-
-                            TextArea {
-                                objectName: "stdoutDisplay"
-                                text: root.executionStdout
-                                readOnly: true
-                                wrapMode: TextArea.NoWrap
-                                font.pixelSize: 11
-                                font.family: "monospace"
-                                color: "#303A32"
-                                background: null
-                                textFormat: TextEdit.PlainText
-                            }
-                        }
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                cursorShape: Qt.PointingHandCursor
+                onClicked: function(mouse) {
+                    if (mouse.button === Qt.RightButton) {
+                        root.orbHidden = true
+                        return
                     }
-                }
-
-                // stderr
-                Rectangle {
-                    width: (parent.width - 8) / 2
-                    height: parent.height
-                    radius: 8
-                    color: root.executionStderr !== "" ? "#FDF8F4" : "#F4F2EB"
-                    border.width: 1
-                    border.color: root.executionStderr !== "" ? "#F0D8C8" : "#E0DDD5"
-
-                    Column {
-                        anchors.fill: parent
-                        anchors.margins: 6
-                        spacing: 4
-
-                        Text {
-                            text: "stderr"
-                            font.pixelSize: 10
-                            font.bold: true
-                            color: root.executionStderr !== "" ? "#C07050" : "#7A7E70"
-                            textFormat: Text.PlainText
-                        }
-
-                        ScrollView {
-                            width: parent.width
-                            height: parent.height - 20
-                            clip: true
-                            ScrollBar.vertical.policy: ScrollBar.AsNeeded
-                            ScrollBar.horizontal.policy: ScrollBar.AsNeeded
-
-                            TextArea {
-                                objectName: "stderrDisplay"
-                                text: root.executionStderr
-                                readOnly: true
-                                wrapMode: TextArea.NoWrap
-                                font.pixelSize: 11
-                                font.family: "monospace"
-                                color: root.executionStderr !== "" ? "#8B3A20" : "#303A32"
-                                background: null
-                                textFormat: TextEdit.PlainText
-                            }
-                        }
-                    }
+                    if (typeof orion !== "undefined" && orion !== null)
+                        orion.setBackgroundMode(false)
                 }
             }
         }

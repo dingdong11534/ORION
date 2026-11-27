@@ -1,0 +1,13 @@
+[Unit]
+Description=ORION Independent Background Automation Worker
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/ORION
+ExecStart=%h/Projects/ORION/.venv/bin/python -m orion.worker.main
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

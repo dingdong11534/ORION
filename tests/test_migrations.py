@@ -119,7 +119,11 @@ def test_orm_metadata_matches_migrated_schema(tmp_path: Path):
     inspector = inspect(engine)
 
     orm_tables = set(Base.metadata.tables.keys())
-    db_tables = set(inspector.get_table_names()) - {"alembic_version"}
+    all_db_tables = set(inspector.get_table_names())
+    assert "document_chunks_fts" in all_db_tables
+    db_tables = {
+        t for t in all_db_tables - {"alembic_version"} if not t.startswith("document_chunks_fts")
+    }
     assert orm_tables == db_tables, f"ORM tables {orm_tables} != DB tables {db_tables}"
 
     for table_name in orm_tables:
