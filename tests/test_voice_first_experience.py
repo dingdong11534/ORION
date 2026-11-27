@@ -240,6 +240,7 @@ def test_qml_persistent_mic_visibility_navigation_and_locked_session(tmp_path: P
     assert not root.isVisible()
     assert orb.isVisible()
 
+    bridge.shutdown()
     del qml
     del bridge
     engine.dispose()
