@@ -519,3 +519,91 @@ class LocalReminderModel(Base):
     last_triggered_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+
+class AutomationJobModel(Base):
+    """Persistent background automation job independent of UI/session lifetime."""
+
+    __tablename__ = "automation_jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_request_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    workflow_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED")
+    browser_lease_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checkpoint_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    cancellation_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    steps: Mapped[list["AutomationJobStepModel"]] = relationship(
+        "AutomationJobStepModel",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (Index("idx_automation_jobs_status", "status"),)
+
+
+class AutomationJobStepModel(Base):
+    """Individual checkpointed step within an automation job."""
+
+    __tablename__ = "automation_job_steps"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("automation_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    idempotent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
+    input_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    job: Mapped["AutomationJobModel"] = relationship("AutomationJobModel", back_populates="steps")
+
+    __table_args__ = (UniqueConstraint("job_id", "step_index", name="uq_automation_job_step_idx"),)
+
+
+class ApprovedApplicationModel(Base):
+    """User-approved desktop application registry entry."""
+
+    __tablename__ = "approved_applications"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    executable_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    allowed_args_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    approved_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+
+
+class AutomationAuditEventModel(Base):
+    """Structured audit trail for native automation, browser, and launcher operations."""
+
+    __tablename__ = "automation_audit_events"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    capability_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(32), nullable=False)
+    request_origin: Mapped[str] = mapped_column(String(64), nullable=False)
+    approval_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (Index("idx_automation_audit_job", "job_id"),)
