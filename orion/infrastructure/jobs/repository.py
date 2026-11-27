@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import sessionmaker
 
 from orion.application.jobs.contracts import (
@@ -140,25 +140,35 @@ class SqliteBackgroundJobStore:
     def claim_next_queued(self) -> AutomationJobRecord | None:
         now = datetime.now(UTC)
         with self._sf() as session, session.begin():
-            row = (
-                session.execute(
-                    select(AutomationJobModel)
-                    .where(AutomationJobModel.status == JobStatus.QUEUED.value)
-                    .order_by(AutomationJobModel.created_at.asc())
-                    .limit(1)
-                )
-                .scalars()
-                .first()
-            )
-            if row is None:
+            # Atomic compare-and-swap claim safe across concurrent SQLite worker processes
+            claimed_id = session.execute(
+                text(
+                    """
+                    UPDATE automation_jobs
+                    SET status = :running_status,
+                        started_at = COALESCE(started_at, :now),
+                        last_heartbeat_at = :now,
+                        updated_at = :now
+                    WHERE id = (
+                        SELECT id FROM automation_jobs
+                        WHERE status = :queued_status
+                        ORDER BY created_at ASC
+                        LIMIT 1
+                    )
+                    AND status = :queued_status
+                    RETURNING id
+                    """
+                ),
+                {
+                    "running_status": JobStatus.RUNNING.value,
+                    "queued_status": JobStatus.QUEUED.value,
+                    "now": now.replace(tzinfo=None),
+                },
+            ).scalar_one_or_none()
+            if claimed_id is None:
                 return None
-            row.status = JobStatus.RUNNING.value
-            if row.started_at is None:
-                row.started_at = now
-            row.last_heartbeat_at = now
-            row.updated_at = now
-            session.flush()
-            return _job_to_record(row)
+            row = session.get(AutomationJobModel, claimed_id)
+            return _job_to_record(row) if row is not None else None
 
     def heartbeat(self, job_id: str) -> None:
         now = datetime.now(UTC)

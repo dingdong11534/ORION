@@ -1,6 +1,7 @@
 """BackgroundJobSupervisor: executes checkpointed jobs independently of UI/session state."""
 
 import logging
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -72,6 +73,14 @@ class BackgroundJobSupervisor:
         """Recover stale RUNNING jobs after a worker crash without replaying non-idempotent steps."""
         return self._store.recover_stale_running_jobs(stale_seconds=stale_seconds)
 
+    def approve_job(self, job_id: str) -> AutomationJobRecord:
+        """Explicitly approve a WAITING_FOR_APPROVAL job so it returns to QUEUED."""
+        return self._store.approve_job(job_id)
+
+    def cancel_job(self, job_id: str) -> AutomationJobRecord:
+        """Request cancellation for a queued, waiting, or running job."""
+        return self._store.request_cancellation(job_id)
+
     def _notify(self, title: str, body: str) -> None:
         if self._notifier is not None:
             try:
@@ -125,6 +134,17 @@ class BackgroundJobSupervisor:
 
                 self._store.heartbeat(job.id)
                 self._store.mark_step_status(job.id, idx, StepStatus.RUNNING)
+                hb_stop = threading.Event()
+
+                def _beat(jid: str = job.id, stop_ev: threading.Event = hb_stop) -> None:
+                    while not stop_ev.wait(5.0):
+                        try:
+                            self._store.heartbeat(jid)
+                        except Exception:
+                            logger.debug("Background heartbeat failed", exc_info=True)
+
+                hb_thread = threading.Thread(target=_beat, daemon=True)
+                hb_thread.start()
                 try:
                     out = runner(current, ctx)
                 except ApprovalRequiredSignal as req:
@@ -137,6 +157,9 @@ class BackgroundJobSupervisor:
                     )
                     self._notify("ORION Approval Required", req.reason)
                     return res
+                finally:
+                    hb_stop.set()
+                    hb_thread.join(timeout=1.0)
 
                 self._store.update_checkpoint(job.id, ctx)
                 self._store.mark_step_status(job.id, idx, StepStatus.SUCCEEDED, output_summary=out)

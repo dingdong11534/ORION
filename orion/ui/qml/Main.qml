@@ -63,6 +63,7 @@ ApplicationWindow {
     property var personalMemories: []
     property var homeDashboard: ({})
     property var backgroundJobs: []
+    property bool orbHidden: false
     property string productivityError: ""
     property string voiceErrorMessage: ""
     property string pendingDeleteId: ""
@@ -426,7 +427,7 @@ ApplicationWindow {
     Window {
         id: orionOrbWindow
         objectName: "orionOrbWindow"
-        visible: root.backgroundMode
+        visible: root.backgroundMode && !root.orbHidden
         width: 72
         height: 72
         flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
@@ -452,8 +453,13 @@ ApplicationWindow {
 
             MouseArea {
                 anchors.fill: parent
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
                 cursorShape: Qt.PointingHandCursor
-                onClicked: {
+                onClicked: function(mouse) {
+                    if (mouse.button === Qt.RightButton) {
+                        root.orbHidden = true
+                        return
+                    }
                     if (typeof orion !== "undefined" && orion !== null)
                         orion.setBackgroundMode(false)
                 }

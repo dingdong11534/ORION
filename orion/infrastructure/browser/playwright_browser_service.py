@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 from orion.application.browser.ports import (
     BrowserLeaseBusyError,
@@ -189,6 +190,7 @@ class PlaywrightBrowserService:
                 accept_downloads=False,
                 ignore_https_errors=False,
             )
+            self._context.route("**/*", self._handle_route)
             pages = self._context.pages
             self._page = pages[0] if pages else self._context.new_page()
             self._page.set_default_timeout(self._timeout_ms)
@@ -197,6 +199,37 @@ class PlaywrightBrowserService:
         except Exception:
             self.close_browser()
             raise
+
+    def _handle_route(self, route: Any) -> None:
+        """Enforce SSRF/public-HTTP validation on every navigation, redirect, and subresource."""
+        url = getattr(route.request, "url", "") or ""
+        try:
+            validate_public_http_url(url, resolve_dns=self._resolve_dns)
+        except ValueError:
+            route.abort("blockedbyclient")
+            return
+
+        if getattr(route.request, "is_navigation_request", lambda: False)():
+            from playwright.sync_api import Error as PlaywrightError
+
+            try:
+                response = route.fetch(max_redirects=0)
+            except (PlaywrightError, OSError, RuntimeError):
+                route.abort("failed")
+                return
+            if response.status in (301, 302, 303, 307, 308):
+                location = (response.headers or {}).get("location", "")
+                if location:
+                    next_url = urljoin(url, location)
+                    try:
+                        validate_public_http_url(next_url, resolve_dns=self._resolve_dns)
+                    except ValueError:
+                        route.abort("blockedbyclient")
+                        return
+            route.fulfill(response=response)
+            return
+
+        route.continue_()
 
     def close_browser(self) -> None:
         """Close the managed browser context and Playwright driver cleanly."""

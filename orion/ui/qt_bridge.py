@@ -2171,30 +2171,51 @@ class OrionBridge(QObject):
         if self._job_store is None:
             self.backgroundJobsLoaded.emit([])
             return
+        from orion.application.jobs.contracts import StepStatus
+
         jobs = self._job_store.list_jobs(limit=25)
-        payload = [
-            {
-                "id": j.id,
-                "summary": j.user_request_summary,
-                "workflow_type": j.workflow_type,
-                "status": str(j.status),
-                "current_step_index": j.current_step_index,
-                "total_steps": j.total_steps,
-                "approval_reason": j.approval_reason or "",
-                "error_summary": j.error_summary or "",
-            }
-            for j in jobs
-        ]
+        payload = []
+        for j in jobs:
+            steps = self._job_store.list_steps(j.id)
+            completed = sum(1 for s in steps if s.status == StepStatus.SUCCEEDED)
+            payload.append(
+                {
+                    "id": j.id,
+                    "summary": j.user_request_summary,
+                    "workflow_type": j.workflow_type,
+                    "status": str(j.status),
+                    "current_step_index": completed,
+                    "total_steps": len(steps),
+                    "approval_reason": j.error_summary or "",
+                    "error_summary": j.error_summary or "",
+                }
+            )
         self.backgroundJobsLoaded.emit(payload)
 
     @Slot(str)
     def approveBackgroundJob(self, job_id: str) -> None:
+        if self._interaction_session is not None:
+            from orion.application.session.interaction_session import SessionState
+
+            if self._interaction_session.state != SessionState.UNLOCKED:
+                logger.warning(
+                    "Refused background job approval for %s while session is %s",
+                    job_id,
+                    self._interaction_session.state,
+                )
+                return
         if self._job_supervisor is not None:
             self._job_supervisor.approve_job(job_id)
+            self.loadBackgroundJobs()
+        elif self._job_store is not None:
+            self._job_store.approve_job(job_id)
             self.loadBackgroundJobs()
 
     @Slot(str)
     def cancelBackgroundJob(self, job_id: str) -> None:
         if self._job_supervisor is not None:
             self._job_supervisor.cancel_job(job_id)
+            self.loadBackgroundJobs()
+        elif self._job_store is not None:
+            self._job_store.request_cancellation(job_id)
             self.loadBackgroundJobs()

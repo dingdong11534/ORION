@@ -1,6 +1,7 @@
 """Independent ORION background worker process (`python -m orion.worker.main`)."""
 
 import logging
+import os
 import shutil
 import signal
 import subprocess
@@ -57,7 +58,9 @@ def build_worker_supervisor(
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [worker] %(levelname)s %(message)s")
     supervisor, engine = build_worker_supervisor()
-    supervisor.recover_on_startup(stale_seconds=60.0)
+    stale_s = float(os.environ.get("ORION_WORKER_STALE_SECONDS", "60.0"))
+    poll_s = float(os.environ.get("ORION_WORKER_POLL_SECONDS", "1.0"))
+    supervisor.recover_on_startup(stale_seconds=stale_s)
 
     stopping = False
 
@@ -74,7 +77,7 @@ def main() -> int:
         while not stopping:
             ran = supervisor.run_next_job()
             if ran is None:
-                time.sleep(1.0)
+                time.sleep(poll_s)
     finally:
         engine.dispose()
         logger.info("ORION background worker stopped.")
