@@ -165,6 +165,33 @@ Rectangle {
                     }
                 }
 
+                RowLayout {
+                    spacing: Theme.spaceXs
+                    visible: root.knowledgeAvailable
+
+                    OrionButton {
+                        objectName: "modeChatButton"
+                        text: "Chat"
+                        compact: true
+                        variant: root.knowledgeMode === "chat" ? "primary" : "secondary"
+                        onClicked: root.setChatKnowledgeMode("chat")
+                    }
+                    OrionButton {
+                        objectName: "modeAskKnowledgeButton"
+                        text: "Ask Knowledge"
+                        compact: true
+                        variant: root.knowledgeMode === "ask_knowledge" ? "primary" : "secondary"
+                        onClicked: root.setChatKnowledgeMode("ask_knowledge")
+                    }
+                    OrionButton {
+                        objectName: "modeSelectedButton"
+                        text: root.selectedKnowledgeIds.length > 0 ? ("Selected (" + root.selectedKnowledgeIds.length + ")") : "Selected"
+                        compact: true
+                        variant: root.knowledgeMode === "selected_sources" ? "primary" : "secondary"
+                        onClicked: root.setChatKnowledgeMode("selected_sources")
+                    }
+                }
+
                 OrionButton {
                     visible: chatPage.width < 980
                     text: "+ New Chat"
@@ -224,6 +251,70 @@ Rectangle {
                             anchors.left: isUser ? undefined : parent.left
                             spacing: Theme.spaceSm
 
+                            // Collapsible Thinking Trace Card (assistant only, never persisted)
+                            Rectangle {
+                                id: thinkingCard
+                                objectName: "thinkingCard"
+                                Layout.fillWidth: true
+                                clip: true
+                                visible: !isUser && ((model.thinkingText || "").length > 0 || model.isThinkingActive)
+                                radius: Theme.radiusCard
+                                color: Theme.sidebar
+                                border.width: 1
+                                border.color: Theme.hairline
+                                implicitHeight: thinkCol.implicitHeight + Theme.spaceMd * 2
+
+                                ColumnLayout {
+                                    id: thinkCol
+                                    anchors.fill: parent
+                                    anchors.margins: Theme.spaceMd
+                                    spacing: Theme.spaceXs
+
+                                    RowLayout {
+                                        objectName: "thinkingToggleHeader"
+                                        Layout.fillWidth: true
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: model.isThinkingActive ? "Thinking..." : "Thinking"
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: Theme.fontCaption
+                                            font.weight: Font.Medium
+                                            color: Theme.textSecondary
+                                            textFormat: Text.PlainText
+                                        }
+                                        OrionButton {
+                                            text: model.thinkingExpanded ? "Hide" : "Show"
+                                            variant: "quiet"
+                                            compact: true
+                                            onClicked: {
+                                                chatPage.chatModel.setProperty(index, "userCollapsedThinking", model.thinkingExpanded)
+                                                chatPage.chatModel.setProperty(index, "thinkingExpanded", !model.thinkingExpanded)
+                                            }
+                                        }
+                                    }
+
+                                    ScrollView {
+                                        Layout.fillWidth: true
+                                        Layout.maximumHeight: 200
+                                        contentWidth: availableWidth
+                                        visible: model.thinkingExpanded
+                                        clip: true
+
+                                        Text {
+                                            id: thinkingPlainText
+                                            objectName: "thinkingPlainText"
+                                            width: parent.width
+                                            text: model.thinkingText || ""
+                                            font.family: Theme.fontFamily
+                                            font.pixelSize: Theme.fontSecondary
+                                            color: Theme.textSecondary
+                                            wrapMode: Text.WordWrap
+                                            textFormat: Text.PlainText
+                                        }
+                                    }
+                                }
+                            }
+
                             // Action Card when productivity action was executed
                             OrionActionCard {
                                 Layout.fillWidth: true
@@ -261,7 +352,7 @@ Rectangle {
                                         font.pixelSize: Theme.fontChat
                                         lineHeight: Theme.chatLineHeight
                                         color: model.isError ? Theme.danger : Theme.text
-                                        wrapMode: Text.Wrap
+                                        wrapMode: Text.WordWrap
                                         textFormat: Text.PlainText
                                     }
 
@@ -271,14 +362,16 @@ Rectangle {
                                         spacing: Theme.spaceSm
 
                                         OrionButton {
-                                            text: (orion.voiceState === "speaking") ? "Stop" : "Play"
+                                            text: (typeof orion !== "undefined" && orion !== null && orion.voiceState === "speaking") ? "Stop" : "Play"
                                             variant: "quiet"
                                             compact: true
                                             onClicked: {
-                                                if (orion.voiceState === "speaking")
-                                                    orion.stopSpeaking()
-                                                else
-                                                    orion.speakMessage(model.text)
+                                                if (typeof orion !== "undefined" && orion !== null) {
+                                                    if (orion.voiceState === "speaking")
+                                                        orion.stopSpeaking()
+                                                    else
+                                                        orion.speakMessage(model.text)
+                                                }
                                             }
                                         }
                                     }
@@ -321,12 +414,12 @@ Rectangle {
                             width: 10
                             height: 10
                             radius: 5
-                            color: orion.voiceState === "recording" ? Theme.danger : Theme.warning
+                            color: (typeof orion !== "undefined" && orion !== null && orion.voiceState === "recording") ? Theme.danger : Theme.warning
                         }
 
                         Text {
                             Layout.fillWidth: true
-                            text: orion.voiceState === "recording"
+                            text: (typeof orion !== "undefined" && orion !== null && orion.voiceState === "recording")
                                 ? ("Recording " + chatPage.formatTimer(chatPage.recordingSeconds) + " · Microphone open")
                                 : "Transcribing offline..."
                             font.family: Theme.fontFamily
@@ -337,18 +430,18 @@ Rectangle {
                         }
 
                         OrionButton {
-                            visible: orion.voiceState === "recording"
+                            visible: (typeof orion !== "undefined" && orion !== null) && orion.voiceState === "recording"
                             text: "Stop"
                             variant: "primary"
                             compact: true
-                            onClicked: orion.stopVoiceRecording()
+                            onClicked: if (typeof orion !== "undefined" && orion !== null) orion.stopVoiceRecording()
                         }
 
                         OrionButton {
                             text: "Cancel"
                             variant: "secondary"
                             compact: true
-                            onClicked: orion.cancelVoiceRecording()
+                            onClicked: if (typeof orion !== "undefined" && orion !== null) orion.cancelVoiceRecording()
                         }
                     }
 
@@ -399,13 +492,12 @@ Rectangle {
                         Layout.fillWidth: true
                         spacing: Theme.spaceSm
 
-                        OrionButton {
+                        OrionToggle {
                             objectName: "showThinkingToggle"
-                            text: root.showThinking ? "Thinking: On" : "Thinking: Off"
-                            variant: root.showThinking ? "secondary" : "quiet"
-                            compact: true
+                            text: "Thinking Mode"
+                            checked: root.showThinking
                             enabled: root.thinkingSupported && !root.busy
-                            onClicked: orion.setShowThinking(!root.showThinking)
+                            onToggled: if (typeof orion !== "undefined" && orion !== null) orion.setShowThinking(checked)
                         }
 
                         OrionButton {
@@ -433,8 +525,8 @@ Rectangle {
                             text: "Mic"
                             variant: "secondary"
                             compact: true
-                            enabled: !root.busy && orion.voiceEnabled
-                            onClicked: orion.startVoiceRecording()
+                            enabled: !root.busy && (typeof orion !== "undefined" && orion !== null && orion.voiceEnabled)
+                            onClicked: if (typeof orion !== "undefined" && orion !== null) orion.startVoiceRecording()
                         }
 
                         OrionButton {

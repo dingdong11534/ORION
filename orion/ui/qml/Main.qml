@@ -30,6 +30,8 @@ ApplicationWindow {
     readonly property int maxThinkingChars: 32768
 
     property string activePage: "chat" // "chat" | "knowledge" | "workspace" | "productivity" | "settings"
+    property bool workspacePanelOpen: false
+    onWorkspacePanelOpenChanged: { if (workspacePanelOpen && activePage !== "workspace") activePage = "workspace" }
     property string activeConversationId: ""
     property bool isInitializing: true
     property bool isSubmitting: false
@@ -63,6 +65,21 @@ ApplicationWindow {
     property string inspectorDocId: ""
     property int inspectorChunkIndex: 0
     property string inspectorText: ""
+    property int approvalRemainingSeconds: 60
+    property string executionId: ""
+    property string executionCommand: ""
+    property var executionArgs: []
+    property string executionCwd: ""
+    property string executionStatus: "idle"
+    property string executionStdout: ""
+    property string executionStderr: ""
+    property int executionExitCode: -1
+    property real executionDurationMs: 0
+    property real executionElapsedMs: 0
+    property bool executionTruncated: false
+    property string executionError: ""
+    property bool executionPanelVisible: false
+    readonly property int maxExecutionDisplayStreamChars: 131072
 
     onActivePageChanged: {
         if (activePage !== "chat" && typeof orion !== "undefined" && orion !== null)
@@ -78,11 +95,11 @@ ApplicationWindow {
         }
     }
 
-    ListModel { id: chatModel }
-    ListModel { id: conversationsModel }
-    ListModel { id: knowledgeSourcesModel }
-    ListModel { id: workspaceEntriesModel }
-    ListModel { id: pendingApprovalsModel }
+    ListModel { id: chatModel; objectName: "chatModel" }
+    ListModel { id: conversationsModel; objectName: "conversationsModel" }
+    ListModel { id: knowledgeSourcesModel; objectName: "knowledgeSourcesModel" }
+    ListModel { id: workspaceEntriesModel; objectName: "workspaceEntriesModel" }
+    ListModel { id: pendingApprovalsModel; objectName: "pendingApprovalsModel" }
 
     OrionState {
         root: root
@@ -149,6 +166,7 @@ ApplicationWindow {
     function insertTranscriptIntoComposer(text) { chatPage.insertTranscript(text) }
     function openKnowledgePage() { root.activePage = "knowledge" }
     function confirmDeleteConversation(convId, convTitle) { root.pendingDeleteId = convId; root.pendingDeleteTitle = convTitle; deleteDialog.open() }
+    function openDeleteConfirmation(convId, convTitle) { confirmDeleteConversation(convId, convTitle) }
     function openRenameDialog(convId, convTitle) { root.pendingRenameId = convId; renameInput.text = convTitle; renameDialog.open() }
     function openInspectorModal() { sourceInspectorModal.open() }
     function isSourceSelected(docId) { return root.selectedKnowledgeIds.indexOf(docId) !== -1 }
@@ -191,32 +209,81 @@ ApplicationWindow {
                     textFormat: Text.PlainText
                 }
 
-                Repeater {
-                    model: [
-                        { key: "chat", label: "Chat", shortLabel: "C" },
-                        { key: "knowledge", label: "Knowledge", shortLabel: "K" },
-                        { key: "workspace", label: "Workspace", shortLabel: "W" },
-                        { key: "productivity", label: "Productivity", shortLabel: "P" }
-                    ]
-                    delegate: OrionListRow {
-                        Layout.fillWidth: true
-                        title: parent.parent.compactRail ? modelData.shortLabel : modelData.label
-                        selected: root.activePage === modelData.key
-                        ToolTip.visible: parent.parent.compactRail && hovered
-                        ToolTip.text: modelData.label
-                        onClicked: root.activePage = modelData.key
-                    }
+                OrionListRow {
+                    objectName: "navChatButton"
+                    Layout.fillWidth: true
+                    title: parent.parent.compactRail ? "C" : "Chat"
+                    selected: root.activePage === "chat"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Chat"
+                    onClicked: root.activePage = "chat"
+                }
+                OrionListRow {
+                    objectName: "knowledgeToggleButton"
+                    Layout.fillWidth: true
+                    title: parent.parent.compactRail ? "K" : "Knowledge"
+                    selected: root.activePage === "knowledge"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Knowledge"
+                    onClicked: root.activePage = "knowledge"
+                }
+                OrionListRow {
+                    objectName: "workspaceBrowserToggleButton"
+                    Layout.fillWidth: true
+                    title: parent.parent.compactRail ? "W" : "Workspace"
+                    selected: root.activePage === "workspace"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Workspace"
+                    onClicked: root.activePage = "workspace"
+                }
+                OrionListRow {
+                    objectName: "navProductivityButton"
+                    Layout.fillWidth: true
+                    title: parent.parent.compactRail ? "P" : "Productivity"
+                    selected: root.activePage === "productivity"
+                    ToolTip.visible: parent.parent.compactRail && hovered
+                    ToolTip.text: "Productivity"
+                    onClicked: root.activePage = "productivity"
                 }
 
                 Item { Layout.fillHeight: true }
 
                 OrionListRow {
+                    objectName: "navSettingsButton"
                     Layout.fillWidth: true
                     title: parent.parent.compactRail ? "S" : "Settings"
                     selected: root.activePage === "settings"
                     ToolTip.visible: parent.parent.compactRail && hovered
                     ToolTip.text: "Settings"
                     onClicked: root.activePage = "settings"
+                }
+
+                ColumnLayout {
+                    visible: !parent.parent.compactRail
+                    Layout.fillWidth: true
+                    Layout.topMargin: Theme.spaceSm
+                    spacing: 2
+                    Text {
+                        id: providerStatusText
+                        objectName: "providerStatusText"
+                        Layout.fillWidth: true
+                        text: root.providerDisplay
+                        font.pixelSize: Theme.fontCaption
+                        font.weight: Font.Medium
+                        color: Theme.textSecondary
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                    }
+                    Text {
+                        id: providerFooterText
+                        objectName: "providerFooterText"
+                        Layout.fillWidth: true
+                        text: root.isSimulatedProvider ? "Simulation Mode" : "Local inference"
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.textSecondary
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                    }
                 }
             }
         }
@@ -228,8 +295,8 @@ ApplicationWindow {
             currentIndex: ["chat", "knowledge", "workspace", "productivity", "settings"].indexOf(root.activePage)
 
             ChatPage { id: chatPage; root: root; chatModel: chatModel; conversationsModel: conversationsModel }
-            KnowledgePage { root: root; theme: Theme; knowledgeSourcesModel: knowledgeSourcesModel }
-            WorkspacePage { root: root; theme: Theme; workspaceEntriesModel: workspaceEntriesModel }
+            KnowledgePage { objectName: "knowledgePanel"; root: root; theme: Theme; knowledgeSourcesModel: knowledgeSourcesModel }
+            WorkspacePage { objectName: "workspaceBrowserPanel"; root: root; theme: Theme; workspaceEntriesModel: workspaceEntriesModel }
             ProductivityPage { root: root }
             SettingsPage { root: root }
         }
@@ -237,6 +304,7 @@ ApplicationWindow {
 
     Dialog {
         id: deleteDialog
+        objectName: "deleteDialog"
         title: "Delete conversation"
         modal: true
         anchors.centerIn: parent
@@ -266,5 +334,14 @@ ApplicationWindow {
             implicitHeight: 280
             TextArea { readOnly: true; wrapMode: TextEdit.Wrap; text: root.inspectorText; color: Theme.text; background: null }
         }
+    }
+
+    OrionApprovalDialog {
+        root: root
+        pendingApprovalsModel: pendingApprovalsModel
+    }
+
+    OrionExecutionDrawer {
+        root: root
     }
 }

@@ -8,6 +8,7 @@ Rectangle {
     property bool selected: false
     property alias hovered: ma.containsMouse
     signal clicked()
+    function click() { clicked() }
 
     radius: Theme.radiusControl
     color: selected ? Theme.window : (ma.containsMouse ? Theme.sidebar : "transparent")

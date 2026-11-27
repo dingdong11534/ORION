@@ -14,3 +14,5 @@ HabitCompletionDonut 1.0 HabitCompletionDonut.qml
 HabitDailyLineChart 1.0 HabitDailyLineChart.qml
 HabitMonthGrid 1.0 HabitMonthGrid.qml
 OrionState 1.0 OrionState.qml
+OrionApprovalDialog 1.0 OrionApprovalDialog.qml
+OrionExecutionDrawer 1.0 OrionExecutionDrawer.qml

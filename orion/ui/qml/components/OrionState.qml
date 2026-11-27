@@ -275,5 +275,68 @@ Item {
         function onVoiceError(code, msg) {
             root.voiceErrorMessage = msg || ("Voice error: " + code)
         }
+
+        function onApprovalRequested(requestDict) {
+            pendingApprovalsModel.append(requestDict)
+            root.approvalRemainingSeconds = 60
+        }
+
+        function onApprovalResolved(approvalId, status) {
+            for (let i = 0; i < pendingApprovalsModel.count; i++) {
+                if (pendingApprovalsModel.get(i).approval_id === approvalId) {
+                    pendingApprovalsModel.remove(i)
+                    root.approvalRemainingSeconds = 60
+                    break
+                }
+            }
+        }
+
+        function onApprovalCancelled(approvalId) {
+            for (let i = 0; i < pendingApprovalsModel.count; i++) {
+                if (pendingApprovalsModel.get(i).approval_id === approvalId) {
+                    pendingApprovalsModel.remove(i)
+                    root.approvalRemainingSeconds = 60
+                    break
+                }
+            }
+        }
+
+        function onExecutionStarted(executionId, command, args, cwd) {
+            root.executionId = executionId
+            root.executionCommand = command
+            root.executionArgs = args
+            root.executionCwd = cwd
+            root.executionStatus = "running"
+            root.executionStdout = ""
+            root.executionStderr = ""
+            root.executionExitCode = -1
+            root.executionDurationMs = 0
+            root.executionElapsedMs = 0
+            root.executionTruncated = false
+            root.executionError = ""
+            root.executionPanelVisible = true
+        }
+
+        function onExecutionOutputChunk(executionId, stream, text) {
+            if (executionId === "" || executionId !== root.executionId) return
+            if (stream === "stdout") {
+                const rem = root.maxExecutionDisplayStreamChars - root.executionStdout.length
+                if (rem > 0) root.executionStdout += (text.length > rem ? text.slice(0, rem) : text)
+                if (text.length > rem) root.executionTruncated = true
+            } else {
+                const rem = root.maxExecutionDisplayStreamChars - root.executionStderr.length
+                if (rem > 0) root.executionStderr += (text.length > rem ? text.slice(0, rem) : text)
+                if (text.length > rem) root.executionTruncated = true
+            }
+        }
+
+        function onExecutionFinished(executionId, status, exitCode, durationMs, truncated, errorMessage) {
+            if (executionId !== root.executionId) return
+            root.executionStatus = status
+            root.executionExitCode = exitCode
+            root.executionDurationMs = durationMs
+            root.executionTruncated = truncated
+            root.executionError = errorMessage
+        }
     }
 }

@@ -198,6 +198,49 @@ def test_heavy_work_gate_tracks_active_kind():
     with gate.acquire("stt", timeout=0.2):
         assert gate.active_kind == "stt"
     assert gate.active_kind is None
+    # 4 & 7. Clearing state and no lock leakage after exception
+    with pytest.raises(RuntimeError, match="boom"), gate.acquire("tts"):
+        assert gate.active_kind == "tts"
+        raise RuntimeError("boom")
+    assert gate.active_kind is None
+    with gate.acquire("stt", timeout=0.2):
+        assert gate.active_kind == "stt"
+    assert gate.active_kind is None
+
+    # 5 & 8. Mutual exclusion between competing operations + bounded waiting
+    entered = threading.Event()
+    release = threading.Event()
+    results: list[str] = []
+
+    def _holder() -> None:
+        with gate.acquire("llm"):
+            entered.set()
+            release.wait(timeout=2.0)
+
+    t = threading.Thread(target=_holder, daemon=True)
+    t.start()
+    assert entered.wait(timeout=1.0)
+    assert gate.active_kind == "llm"
+
+    with pytest.raises(TimeoutError), gate.acquire("stt", timeout=0.05):
+        results.append("should_not_enter")
+
+    release.set()
+    t.join(timeout=1.0)
+    assert gate.active_kind is None
+    assert results == []
+
+    # 6. Correct release after cancellation / KeyboardInterrupt-like BaseException
+    class _Cancelled(BaseException):
+        pass
+
+    with pytest.raises(_Cancelled), gate.acquire("stt"):
+        assert gate.active_kind == "stt"
+        raise _Cancelled()
+    assert gate.active_kind is None
+    with gate.acquire("tts", timeout=0.2):
+        assert gate.active_kind == "tts"
+    assert gate.active_kind is None
 
     # 5 & 8. Mutual exclusion between competing operations + bounded waiting
     entered = threading.Event()
