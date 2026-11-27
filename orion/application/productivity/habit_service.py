@@ -276,7 +276,7 @@ class HabitService:
         notes: str | None = None,
     ) -> HabitCompletionRecord:
         now = self._clock.now()
-        target_date = completed_date if completed_date is not None else now.date()
+        target_date = completed_date if completed_date is not None else self._clock.today()
         return self._store.record_completion(
             habit_id,
             completed_at=now,

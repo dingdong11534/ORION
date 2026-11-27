@@ -1,471 +1,293 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "../components"
 
-Item {
+Rectangle {
     id: prodPage
     required property var root
-    required property var theme
 
-    property string activeSection: "today"  // "today" | "tasks" | "habits"
-    property var editingTask: null
-    property var editingHabit: null
+    property string activeTab: "today" // "today" | "tasks" | "habits"
+    property string selectedHabitId: ""
+    property int selectedHabitIndex: 0
+    property var habitStatsData: null
 
-    function refreshData() {
-        if (typeof orion !== "undefined" && orion !== null && root.productivityAvailable) {
-            orion.loadProductivityData(
-                taskStatusFilter.currentIndex === 0 ? "" : taskStatusFilter.currentText,
-                taskPriorityFilter.currentIndex === 0 ? "" : taskPriorityFilter.currentText,
-                taskSearchInput.text,
-                taskSortCombo.currentValue || "priority_due"
-            )
+    readonly property int currentYear: new Date().getFullYear()
+    readonly property int currentMonth: new Date().getMonth() + 1
+
+    color: Theme.window
+
+    function ensureHabitSelected() {
+        if (!root.prodHabits || root.prodHabits.length === 0) {
+            selectedHabitId = ""
+            habitStatsData = null
+            return
+        }
+        let found = false
+        for (let i = 0; i < root.prodHabits.length; i++) {
+            if (root.prodHabits[i].id === selectedHabitId) {
+                selectedHabitIndex = i
+                found = true
+                break
+            }
+        }
+        if (!found) {
+            selectedHabitId = root.prodHabits[0].id
+            selectedHabitIndex = 0
+        }
+        if (typeof orion !== "undefined" && orion !== null && selectedHabitId.length > 0) {
+            orion.loadHabitStats(selectedHabitId, currentYear, currentMonth)
         }
     }
 
+    Connections {
+        target: orion
+        function onHabitStatsLoaded(payload) {
+            if (payload && payload.habit_id === prodPage.selectedHabitId) {
+                prodPage.habitStatsData = payload
+            }
+        }
+        function onProductivityDataLoaded() {
+            Qt.callLater(prodPage.ensureHabitSelected)
+        }
+    }
+
+    Component.onCompleted: ensureHabitSelected()
+
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: theme.spaceLg
-        spacing: theme.spaceMd
+        anchors.margins: Theme.spaceXl
+        spacing: Theme.spaceLg
 
-        // Header & Section Tabs
+        // Header + Sub-tabs
         RowLayout {
             Layout.fillWidth: true
-            spacing: theme.spaceSm
+            spacing: Theme.spaceMd
 
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 2
-                Text {
-                    text: "Personal Productivity"
-                    font.pixelSize: theme.fontLg
-                    font.bold: true
-                    color: theme.textPrimary
-                    textFormat: Text.PlainText
-                }
-                Text {
-                    text: "Manage tasks, track habits, or use natural language directly in Chat."
-                    font.pixelSize: theme.fontXs
-                    color: theme.textMuted
-                    textFormat: Text.PlainText
-                }
+            Text {
+                text: prodPage.activeTab === "today" ? "Today" : (prodPage.activeTab === "tasks" ? "Tasks" : "Habits")
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontPageTitle
+                font.weight: Font.Medium
+                color: Theme.text
+                textFormat: Text.PlainText
             }
 
+            Item { Layout.fillWidth: true }
+
             RowLayout {
-                spacing: 4
-                Repeater {
-                    model: [
-                        { key: "today", label: "Today", obj: "productivityTabToday" },
-                        { key: "tasks", label: "Tasks", obj: "productivityTabTasks" },
-                        { key: "habits", label: "Habits", obj: "productivityTabHabits" }
-                    ]
-                    delegate: Button {
-                        objectName: modelData.obj
-                        text: modelData.label
-                        implicitHeight: 30
-                        implicitWidth: implicitContentWidth + 20
-                        onClicked: {
-                            prodPage.activeSection = modelData.key
-                            prodPage.refreshData()
-                        }
-                        background: Rectangle {
-                            radius: theme.radiusSm
-                            color: prodPage.activeSection === modelData.key ? theme.accent : theme.bgSurface
-                            border.width: 1
-                            border.color: prodPage.activeSection === modelData.key ? theme.accent : theme.borderStrong
-                        }
-                        contentItem: Text {
-                            text: parent.text
-                            font.pixelSize: theme.fontXs
-                            font.bold: true
-                            color: prodPage.activeSection === modelData.key ? theme.bgSurface : theme.textPrimary
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                            textFormat: Text.PlainText
-                        }
+                spacing: Theme.spaceXs
+                OrionButton {
+                    objectName: "prodTabToday"
+                    text: "Today"
+                    compact: true
+                    variant: prodPage.activeTab === "today" ? "primary" : "secondary"
+                    onClicked: prodPage.activeTab = "today"
+                }
+                OrionButton {
+                    objectName: "prodTabTasks"
+                    text: "Tasks"
+                    compact: true
+                    variant: prodPage.activeTab === "tasks" ? "primary" : "secondary"
+                    onClicked: prodPage.activeTab = "tasks"
+                }
+                OrionButton {
+                    objectName: "prodTabHabits"
+                    text: "Habits"
+                    compact: true
+                    variant: prodPage.activeTab === "habits" ? "primary" : "secondary"
+                    onClicked: {
+                        prodPage.activeTab = "habits"
+                        prodPage.ensureHabitSelected()
                     }
                 }
             }
         }
 
-        // Error banner
-        Rectangle {
-            visible: root.productivityError !== ""
+        OrionBanner {
             Layout.fillWidth: true
-            implicitHeight: errTxt.implicitHeight + 12
-            radius: theme.radiusSm
-            color: theme.dangerBg
-            border.width: 1
-            border.color: theme.danger
-            RowLayout {
-                anchors.fill: parent
-                anchors.margins: 6
-                Text {
-                    id: errTxt
-                    Layout.fillWidth: true
-                    text: root.productivityError
-                    font.pixelSize: theme.fontXs
-                    color: theme.danger
-                    wrapMode: Text.Wrap
-                    textFormat: Text.PlainText
-                }
-                Button {
-                    text: "Dismiss"
-                    implicitHeight: 22
-                    onClicked: root.productivityError = ""
-                }
-            }
+            message: root.productivityError
+            severity: "danger"
+            actionLabel: "Dismiss"
+            onActionClicked: root.productivityError = ""
         }
 
-        // ============================================================
-        // SECTION A: TODAY
-        // ============================================================
+        // TAB 1: TODAY
         ScrollView {
-            visible: prodPage.activeSection === "today"
+            visible: prodPage.activeTab === "today"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            contentWidth: availableWidth
             clip: true
 
             ColumnLayout {
-                width: prodPage.width - theme.spaceLg * 2
-                spacing: theme.spaceMd
+                width: Math.min(parent.width, 960)
+                spacing: Theme.spaceLg
 
-                // Quick-add Task Bar
-                Rectangle {
+                OrionEmptyState {
                     Layout.fillWidth: true
-                    implicitHeight: quickAddCol.implicitHeight + 16
-                    radius: theme.radiusMd
-                    color: theme.bgSurface
-                    border.width: 1
-                    border.color: theme.border
-
-                    ColumnLayout {
-                        id: quickAddCol
-                        anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 6
-
-                        Text {
-                            text: "Quick Add Task"
-                            font.pixelSize: theme.fontXs
-                            font.bold: true
-                            color: theme.textSecondary
-                            textFormat: Text.PlainText
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 6
-
-                            TextField {
-                                id: quickTaskInput
-                                objectName: "quickTaskInput"
-                                Layout.fillWidth: true
-                                implicitHeight: 32
-                                placeholderText: "Task title (e.g., Finish COA Unit 4)..."
-                                font.pixelSize: theme.fontSm
-                                color: theme.textPrimary
-                                placeholderTextColor: theme.textMuted
-                                background: Rectangle { radius: 6; color: theme.bgSurfaceAlt; border.width: 1; border.color: theme.borderStrong }
-                            }
-
-                            ComboBox {
-                                id: quickTaskPriority
-                                objectName: "quickTaskPriority"
-                                Layout.preferredWidth: 105
-                                implicitHeight: 32
-                                model: ["medium", "high", "critical", "low"]
-                            }
-
-                            TextField {
-                                id: quickTaskDueInput
-                                objectName: "quickTaskDueInput"
-                                Layout.preferredWidth: 130
-                                implicitHeight: 32
-                                placeholderText: "Due (e.g., today, Friday)"
-                                font.pixelSize: theme.fontXs
-                                color: theme.textPrimary
-                                placeholderTextColor: theme.textMuted
-                                background: Rectangle { radius: 6; color: theme.bgSurfaceAlt; border.width: 1; border.color: theme.borderStrong }
-                            }
-
-                            Button {
-                                objectName: "quickAddTaskButton"
-                                text: "Add"
-                                implicitHeight: 32
-                                implicitWidth: 64
-                                onClicked: {
-                                    if (quickTaskInput.text.trim().length > 0 && typeof orion !== "undefined" && orion !== null) {
-                                        orion.createTask(quickTaskInput.text.trim(), "", quickTaskPriority.currentText, quickTaskDueInput.text.trim())
-                                        quickTaskInput.text = ""
-                                        quickTaskDueInput.text = ""
-                                    }
-                                }
-                                background: Rectangle { radius: 6; color: theme.accent }
-                                contentItem: Text {
-                                    text: parent.text; font.pixelSize: theme.fontXs; font.bold: true; color: theme.bgSurface
-                                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; textFormat: Text.PlainText
-                                }
-                            }
-                        }
-                    }
+                    visible: root.prodAllTasks.length === 0 && root.prodHabits.length === 0
+                    title: "Nothing scheduled yet"
+                    subtitle: "Create your first task or habit to see your daily plan here."
+                    actionLabel: "Add a task"
+                    onActionClicked: prodPage.activeTab = "tasks"
                 }
 
-                // Today's Habit Check-ins
-                Rectangle {
+                // Overdue
+                OrionCard {
                     Layout.fillWidth: true
-                    implicitHeight: todayHabitsCol.implicitHeight + 18
-                    radius: theme.radiusMd
-                    color: theme.bgSurface
-                    border.width: 1
-                    border.color: theme.border
-
-                    ColumnLayout {
-                        id: todayHabitsCol
-                        anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 6
-
-                        Text {
-                            text: "Today's Habit Check-ins (" + root.prodHabits.length + ")"
-                            font.pixelSize: theme.fontSm
-                            font.bold: true
-                            color: theme.textPrimary
-                            textFormat: Text.PlainText
-                        }
-
-                        Text {
-                            visible: root.prodHabits.length === 0
-                            text: "No habits yet. Switch to Habits or tell Chat: \"Create a daily reading habit.\""
-                            font.pixelSize: theme.fontXs
-                            color: theme.textMuted
-                            textFormat: Text.PlainText
-                        }
-
-                        Repeater {
-                            model: root.prodHabits
-                            delegate: Rectangle {
-                                Layout.fillWidth: true
-                                implicitHeight: 40
-                                radius: 6
-                                color: theme.bgSurfaceAlt
-                                border.width: 1
-                                border.color: modelData.completed_today ? theme.accent : theme.border
-
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 10
-                                    anchors.rightMargin: 8
-                                    spacing: 8
-
-                                    Text {
-                                        Layout.fillWidth: true
-                                        text: modelData.name + " · Streak: " + modelData.current_streak + " · " + modelData.frequency
-                                        font.pixelSize: theme.fontXs
-                                        font.bold: true
-                                        color: theme.textPrimary
-                                        elide: Text.ElideRight
-                                        textFormat: Text.PlainText
-                                    }
-
-                                    Button {
-                                        text: modelData.completed_today ? "Done Today ✓" : "Complete"
-                                        enabled: !modelData.completed_today
-                                        implicitHeight: 26
-                                        implicitWidth: implicitContentWidth + 14
-                                        onClicked: {
-                                            if (typeof orion !== "undefined" && orion !== null)
-                                                orion.completeHabit(modelData.id)
-                                        }
-                                        background: Rectangle {
-                                            radius: 5
-                                            color: modelData.completed_today ? theme.accentLight : theme.accent
-                                        }
-                                        contentItem: Text {
-                                            text: parent.text
-                                            font.pixelSize: 11
-                                            font.bold: true
-                                            color: modelData.completed_today ? theme.accent : theme.bgSurface
-                                            horizontalAlignment: Text.AlignHCenter
-                                            verticalAlignment: Text.AlignVCenter
-                                            textFormat: Text.PlainText
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Overdue Tasks
-                Rectangle {
                     visible: root.prodOverdueTasks.length > 0
-                    Layout.fillWidth: true
-                    implicitHeight: overdueCol.implicitHeight + 18
-                    radius: theme.radiusMd
-                    color: theme.dangerBg
-                    border.width: 1
-                    border.color: theme.danger
-
+                    implicitHeight: overdueCol.implicitHeight + Theme.spaceLg * 2
                     ColumnLayout {
                         id: overdueCol
                         anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 6
-
-                        Text {
-                            text: "Overdue Tasks (" + root.prodOverdueTasks.length + ")"
-                            font.pixelSize: theme.fontSm
-                            font.bold: true
-                            color: theme.danger
-                            textFormat: Text.PlainText
-                        }
-
+                        anchors.margins: Theme.spaceLg
+                        spacing: Theme.spaceSm
+                        OrionSectionHeader { title: "Overdue"; count: root.prodOverdueTasks.length }
                         Repeater {
                             model: root.prodOverdueTasks
-                            delegate: Rectangle {
+                            delegate: RowLayout {
                                 Layout.fillWidth: true
-                                implicitHeight: 38
-                                radius: 6
-                                color: theme.bgSurface
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 10
-                                    anchors.rightMargin: 8
-                                    Text {
-                                        Layout.fillWidth: true
-                                        text: "[" + modelData.priority.toUpperCase() + "] " + modelData.title + (modelData.due_display ? (" · Due " + modelData.due_display) : "")
-                                        font.pixelSize: theme.fontXs
-                                        color: theme.textPrimary
-                                        elide: Text.ElideRight
-                                        textFormat: Text.PlainText
-                                    }
-                                    Button {
-                                        text: "Complete"
-                                        implicitHeight: 24
-                                        onClicked: orion.completeTask(modelData.id)
-                                    }
+                                spacing: Theme.spaceMd
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.title + " · " + modelData.priority.toUpperCase() + (modelData.due_display ? (" · " + modelData.due_display) : "")
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontBody
+                                    color: Theme.danger
+                                    wrapMode: Text.Wrap
+                                    textFormat: Text.PlainText
+                                }
+                                OrionButton {
+                                    text: "Done"
+                                    compact: true
+                                    variant: "secondary"
+                                    onClicked: orion.completeTask(modelData.id)
                                 }
                             }
                         }
                     }
                 }
 
-                // Today's Tasks
-                Rectangle {
+                // Due Today
+                OrionCard {
                     Layout.fillWidth: true
-                    implicitHeight: todayTasksCol.implicitHeight + 18
-                    radius: theme.radiusMd
-                    color: theme.bgSurface
-                    border.width: 1
-                    border.color: theme.border
-
+                    visible: root.prodAllTasks.length > 0 || root.prodHabits.length > 0
+                    implicitHeight: dueTodayCol.implicitHeight + Theme.spaceLg * 2
                     ColumnLayout {
-                        id: todayTasksCol
+                        id: dueTodayCol
                         anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 6
-
-                        Text {
-                            text: "Today's Tasks (" + root.prodTodayTasks.length + ")"
-                            font.pixelSize: theme.fontSm
-                            font.bold: true
-                            color: theme.textPrimary
-                            textFormat: Text.PlainText
-                        }
-
+                        anchors.margins: Theme.spaceLg
+                        spacing: Theme.spaceSm
+                        OrionSectionHeader { title: "Due today"; count: root.prodTodayTasks.length }
                         Text {
                             visible: root.prodTodayTasks.length === 0
                             text: "No tasks due today."
-                            font.pixelSize: theme.fontXs
-                            color: theme.textMuted
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.fontSecondary
+                            color: Theme.textSecondary
                             textFormat: Text.PlainText
                         }
-
                         Repeater {
                             model: root.prodTodayTasks
-                            delegate: Rectangle {
+                            delegate: RowLayout {
                                 Layout.fillWidth: true
-                                implicitHeight: 38
-                                radius: 6
-                                color: theme.bgSurfaceAlt
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 10
-                                    anchors.rightMargin: 8
-                                    Text {
-                                        Layout.fillWidth: true
-                                        text: "[" + modelData.priority.toUpperCase() + "] " + modelData.title + (modelData.due_display ? (" · " + modelData.due_display) : "")
-                                        font.pixelSize: theme.fontXs
-                                        color: theme.textPrimary
-                                        elide: Text.ElideRight
-                                        textFormat: Text.PlainText
-                                    }
-                                    Button {
-                                        text: "Complete"
-                                        implicitHeight: 24
-                                        onClicked: orion.completeTask(modelData.id)
-                                    }
+                                spacing: Theme.spaceMd
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.title + " · " + modelData.priority.toUpperCase() + (modelData.due_display ? (" · " + modelData.due_display) : "")
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontBody
+                                    color: Theme.text
+                                    wrapMode: Text.Wrap
+                                    textFormat: Text.PlainText
+                                }
+                                OrionButton {
+                                    text: "Done"
+                                    compact: true
+                                    variant: "primary"
+                                    onClicked: orion.completeTask(modelData.id)
                                 }
                             }
                         }
                     }
                 }
 
-                // Upcoming Tasks
-                Rectangle {
+                // Unscheduled
+                OrionCard {
                     Layout.fillWidth: true
-                    implicitHeight: upcomingCol.implicitHeight + 18
-                    radius: theme.radiusMd
-                    color: theme.bgSurface
-                    border.width: 1
-                    border.color: theme.border
-
+                    visible: root.prodUnscheduledTasks.length > 0
+                    implicitHeight: unschedCol.implicitHeight + Theme.spaceLg * 2
                     ColumnLayout {
-                        id: upcomingCol
+                        id: unschedCol
                         anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 6
-
-                        Text {
-                            text: "Upcoming Tasks (" + root.prodUpcomingTasks.length + ")"
-                            font.pixelSize: theme.fontSm
-                            font.bold: true
-                            color: theme.textPrimary
-                            textFormat: Text.PlainText
-                        }
-
-                        Text {
-                            visible: root.prodUpcomingTasks.length === 0
-                            text: "No upcoming scheduled tasks."
-                            font.pixelSize: theme.fontXs
-                            color: theme.textMuted
-                            textFormat: Text.PlainText
-                        }
-
+                        anchors.margins: Theme.spaceLg
+                        spacing: Theme.spaceSm
+                        OrionSectionHeader { title: "Unscheduled"; count: root.prodUnscheduledTasks.length }
                         Repeater {
-                            model: root.prodUpcomingTasks
-                            delegate: Rectangle {
+                            model: root.prodUnscheduledTasks
+                            delegate: RowLayout {
                                 Layout.fillWidth: true
-                                implicitHeight: 38
-                                radius: 6
-                                color: theme.bgSurfaceAlt
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 10
-                                    anchors.rightMargin: 8
-                                    Text {
-                                        Layout.fillWidth: true
-                                        text: "[" + modelData.priority.toUpperCase() + "] " + modelData.title + (modelData.due_display ? (" · Due " + modelData.due_display) : "")
-                                        font.pixelSize: theme.fontXs
-                                        color: theme.textPrimary
-                                        elide: Text.ElideRight
-                                        textFormat: Text.PlainText
-                                    }
-                                    Button {
-                                        text: "Complete"
-                                        implicitHeight: 24
-                                        onClicked: orion.completeTask(modelData.id)
-                                    }
+                                spacing: Theme.spaceMd
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.title + " · " + modelData.priority.toUpperCase()
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontBody
+                                    color: Theme.text
+                                    wrapMode: Text.Wrap
+                                    textFormat: Text.PlainText
+                                }
+                                OrionButton {
+                                    text: "Done"
+                                    compact: true
+                                    variant: "secondary"
+                                    onClicked: orion.completeTask(modelData.id)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Today's Habits
+                OrionCard {
+                    Layout.fillWidth: true
+                    visible: root.prodHabits.length > 0
+                    implicitHeight: todayHabitsCol.implicitHeight + Theme.spaceLg * 2
+                    ColumnLayout {
+                        id: todayHabitsCol
+                        anchors.fill: parent
+                        anchors.margins: Theme.spaceLg
+                        spacing: Theme.spaceMd
+                        OrionSectionHeader { title: "Habits today"; count: root.prodHabits.length }
+                        Repeater {
+                            model: root.prodHabits
+                            delegate: RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spaceMd
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.name + " · Streak " + modelData.current_streak
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontBody
+                                    color: Theme.text
+                                    textFormat: Text.PlainText
+                                }
+                                Text {
+                                    visible: modelData.completed_today
+                                    text: "Done"
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontSecondary
+                                    font.weight: Font.Medium
+                                    color: Theme.accent
+                                    textFormat: Text.PlainText
+                                }
+                                OrionButton {
+                                    visible: !modelData.completed_today
+                                    text: "Check in"
+                                    compact: true
+                                    variant: "primary"
+                                    onClicked: orion.completeHabit(modelData.id)
                                 }
                             }
                         }
@@ -474,127 +296,94 @@ Item {
             }
         }
 
-        // ============================================================
-        // SECTION B: TASKS
-        // ============================================================
+        // TAB 2: TASKS
         ColumnLayout {
-            visible: prodPage.activeSection === "tasks"
+            visible: prodPage.activeTab === "tasks"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: theme.spaceSm
+            spacing: Theme.spaceMd
 
-            RowLayout {
+            OrionCard {
                 Layout.fillWidth: true
-                spacing: 6
-
-                TextField {
-                    id: taskSearchInput
-                    objectName: "taskSearchInput"
-                    Layout.fillWidth: true
-                    implicitHeight: 30
-                    placeholderText: "Search tasks..."
-                    font.pixelSize: theme.fontXs
-                    color: theme.textPrimary
-                    placeholderTextColor: theme.textMuted
-                    background: Rectangle { radius: 6; color: theme.bgSurface; border.width: 1; border.color: theme.borderStrong }
-                    onTextChanged: prodPage.refreshData()
-                }
-
-                ComboBox {
-                    id: taskStatusFilter
-                    objectName: "taskStatusFilter"
-                    Layout.preferredWidth: 115
-                    implicitHeight: 30
-                    model: ["All Status", "todo", "in_progress", "done", "cancelled"]
-                    onCurrentIndexChanged: prodPage.refreshData()
-                }
-
-                ComboBox {
-                    id: taskPriorityFilter
-                    objectName: "taskPriorityFilter"
-                    Layout.preferredWidth: 115
-                    implicitHeight: 30
-                    model: ["All Priority", "critical", "high", "medium", "low"]
-                    onCurrentIndexChanged: prodPage.refreshData()
-                }
-
-                ComboBox {
-                    id: taskSortCombo
-                    objectName: "taskSortCombo"
-                    Layout.preferredWidth: 130
-                    implicitHeight: 30
-                    textRole: "label"
-                    valueRole: "val"
-                    model: [
-                        { label: "Sort: Priority+Due", val: "priority_due" },
-                        { label: "Sort: Deadline", val: "due_at" },
-                        { label: "Sort: Priority", val: "priority" },
-                        { label: "Sort: Updated", val: "updated_at" }
-                    ]
-                    onCurrentIndexChanged: prodPage.refreshData()
+                implicitHeight: newTaskRow.implicitHeight + Theme.spaceLg * 2
+                RowLayout {
+                    id: newTaskRow
+                    anchors.fill: parent
+                    anchors.margins: Theme.spaceLg
+                    spacing: Theme.spaceSm
+                    OrionTextField {
+                        id: newTaskTitle
+                        Layout.fillWidth: true
+                        placeholderText: "New task title..."
+                    }
+                    OrionTextField {
+                        id: newTaskDue
+                        Layout.preferredWidth: 160
+                        placeholderText: "Due (e.g. today 4pm)"
+                    }
+                    ComboBox {
+                        id: newTaskPriority
+                        model: ["medium", "high", "critical", "low"]
+                        implicitHeight: Theme.controlHeight
+                    }
+                    OrionButton {
+                        text: "Add Task"
+                        variant: "primary"
+                        enabled: newTaskTitle.text.trim().length > 0
+                        onClicked: {
+                            orion.createTask(newTaskTitle.text.trim(), "", newTaskPriority.currentText, newTaskDue.text.trim())
+                            newTaskTitle.text = ""
+                            newTaskDue.text = ""
+                        }
+                    }
                 }
             }
 
             ListView {
-                objectName: "tasksListView"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                spacing: 6
+                spacing: Theme.spaceSm
                 model: root.prodAllTasks
-
-                delegate: Rectangle {
+                delegate: OrionCard {
                     width: ListView.view.width
-                    implicitHeight: taskRowCol.implicitHeight + 16
-                    radius: theme.radiusSm
-                    color: theme.bgSurface
-                    border.width: 1
-                    border.color: theme.border
-
+                    implicitHeight: taskRow.implicitHeight + Theme.spaceMd * 2
                     RowLayout {
-                        id: taskRowCol
+                        id: taskRow
                         anchors.fill: parent
-                        anchors.margins: 8
-                        spacing: 8
-
+                        anchors.margins: Theme.spaceMd
+                        spacing: Theme.spaceMd
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 2
                             Text {
                                 Layout.fillWidth: true
                                 text: modelData.title
-                                font.pixelSize: theme.fontSm
-                                font.bold: true
-                                font.strikeout: modelData.status === "done"
-                                color: modelData.status === "done" ? theme.textMuted : theme.textPrimary
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontBody
+                                font.weight: Font.Medium
+                                color: Theme.text
                                 wrapMode: Text.Wrap
                                 textFormat: Text.PlainText
                             }
                             Text {
-                                Layout.fillWidth: true
-                                text: "Status: " + modelData.status + " · Priority: " + modelData.priority.toUpperCase() + (modelData.due_display ? (" · Due: " + modelData.due_display) : "")
-                                font.pixelSize: 11
-                                color: theme.textSecondary
+                                text: "Priority: " + modelData.priority.toUpperCase() + " · Status: " + modelData.status + (modelData.due_display ? (" · Due: " + modelData.due_display) : "")
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.textSecondary
                                 textFormat: Text.PlainText
                             }
                         }
-
-                        Button {
+                        OrionButton {
                             text: modelData.status === "done" ? "Reopen" : "Complete"
-                            implicitHeight: 26
-                            onClicked: {
-                                if (modelData.status === "done") orion.reopenTask(modelData.id)
-                                else orion.completeTask(modelData.id)
-                            }
+                            compact: true
+                            variant: modelData.status === "done" ? "secondary" : "primary"
+                            onClicked: modelData.status === "done" ? orion.reopenTask(modelData.id) : orion.completeTask(modelData.id)
                         }
-                        Button {
-                            text: "Edit"
-                            implicitHeight: 26
-                            onClicked: prodPage.editingTask = modelData
-                        }
-                        Button {
+                        OrionButton {
                             text: "Archive"
-                            implicitHeight: 26
+                            compact: true
+                            variant: "danger"
                             onClicked: orion.archiveTask(modelData.id)
                         }
                     }
@@ -602,296 +391,229 @@ Item {
             }
         }
 
-        // ============================================================
-        // SECTION C: HABITS
-        // ============================================================
+        // TAB 3: HABITS + 4 CUSTOM VISUALS
         ColumnLayout {
-            visible: prodPage.activeSection === "habits"
+            visible: prodPage.activeTab === "habits"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: theme.spaceSm
+            spacing: Theme.spaceMd
 
-            // Create Habit Bar
-            Rectangle {
+            OrionEmptyState {
                 Layout.fillWidth: true
-                implicitHeight: addHabitRow.implicitHeight + 14
-                radius: theme.radiusSm
-                color: theme.bgSurface
-                border.width: 1
-                border.color: theme.border
+                visible: root.prodHabits.length === 0
+                title: "No habits yet"
+                subtitle: "Create your first habit to track streaks, monthly consistency, and your year ring."
+                actionLabel: "Create your first habit"
+                onActionClicked: newHabitName.forceActiveFocus()
+            }
 
+            OrionCard {
+                Layout.fillWidth: true
+                implicitHeight: newHabitRow.implicitHeight + Theme.spaceMd * 2
                 RowLayout {
-                    id: addHabitRow
+                    id: newHabitRow
                     anchors.fill: parent
-                    anchors.margins: 7
-                    spacing: 6
-
-                    TextField {
-                        id: newHabitNameInput
-                        objectName: "newHabitNameInput"
+                    anchors.margins: Theme.spaceMd
+                    spacing: Theme.spaceSm
+                    OrionTextField {
+                        id: newHabitName
                         Layout.fillWidth: true
-                        implicitHeight: 30
-                        placeholderText: "New habit name (e.g., Reading, Workout)..."
-                        font.pixelSize: theme.fontXs
-                        color: theme.textPrimary
-                        placeholderTextColor: theme.textMuted
-                        background: Rectangle { radius: 6; color: theme.bgSurfaceAlt; border.width: 1; border.color: theme.borderStrong }
+                        placeholderText: "New habit name (e.g. Reading)..."
                     }
-
                     ComboBox {
-                        id: newHabitFreqCombo
-                        objectName: "newHabitFreqCombo"
-                        Layout.preferredWidth: 100
-                        implicitHeight: 30
+                        id: newHabitFreq
                         model: ["daily", "weekly", "monthly"]
+                        implicitHeight: Theme.controlHeight
                     }
-
-                    SpinBox {
-                        id: newHabitTargetSpin
-                        objectName: "newHabitTargetSpin"
-                        from: 1
-                        to: 31
-                        value: 1
-                        implicitHeight: 30
-                    }
-
-                    Button {
-                        objectName: "createHabitButton"
-                        text: "+ Create Habit"
-                        implicitHeight: 30
-                        implicitWidth: implicitContentWidth + 16
+                    OrionButton {
+                        text: "Add Habit"
+                        variant: "primary"
+                        enabled: newHabitName.text.trim().length > 0
                         onClicked: {
-                            if (newHabitNameInput.text.trim().length > 0 && typeof orion !== "undefined" && orion !== null) {
-                                orion.createHabit(newHabitNameInput.text.trim(), "", newHabitFreqCombo.currentText, newHabitTargetSpin.value)
-                                newHabitNameInput.text = ""
-                                newHabitTargetSpin.value = 1
-                            }
-                        }
-                        background: Rectangle { radius: 6; color: theme.accent }
-                        contentItem: Text {
-                            text: parent.text; font.pixelSize: theme.fontXs; font.bold: true; color: theme.bgSurface
-                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; textFormat: Text.PlainText
+                            orion.createHabit(newHabitName.text.trim(), "", newHabitFreq.currentText, 1)
+                            newHabitName.text = ""
                         }
                     }
                 }
             }
 
-            ListView {
-                objectName: "habitsListView"
+            GridLayout {
+                visible: root.prodHabits.length > 0
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                clip: true
-                spacing: 8
-                model: root.prodHabits
+                columns: prodPage.width < 1000 ? 1 : 2
+                columnSpacing: Theme.spaceLg
+                rowSpacing: Theme.spaceLg
 
-                delegate: Rectangle {
-                    width: ListView.view.width
-                    implicitHeight: habitCardCol.implicitHeight + 16
-                    radius: theme.radiusSm
-                    color: theme.bgSurface
-                    border.width: 1
-                    border.color: theme.border
+                // Left column: Habit list + Year ring tracker
+                ScrollView {
+                    Layout.fillHeight: true
+                    Layout.preferredWidth: prodPage.width < 1000 ? prodPage.width - Theme.spaceXl * 2 : 300
+                    contentWidth: availableWidth
+                    clip: true
 
                     ColumnLayout {
-                        id: habitCardCol
-                        anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 6
+                        width: parent.width
+                        spacing: Theme.spaceMd
 
-                        RowLayout {
+                        OrionCard {
                             Layout.fillWidth: true
-                            spacing: 8
-
+                            implicitHeight: hListCol.implicitHeight + Theme.spaceMd * 2
                             ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 2
-                                Text {
-                                    text: modelData.name + " (" + modelData.frequency + ", target " + modelData.target_count + ")"
-                                    font.pixelSize: theme.fontSm
-                                    font.bold: true
-                                    color: theme.textPrimary
-                                    textFormat: Text.PlainText
-                                }
-                                Text {
-                                    text: "Current streak: " + modelData.current_streak + " · Longest: " + modelData.longest_streak + " · Rate: " + modelData.completion_rate + "% · Week: " + modelData.weekly_completed + "/" + modelData.weekly_target + " · Month: " + modelData.monthly_completed + "/" + modelData.monthly_target
-                                    font.pixelSize: 11
-                                    color: theme.textSecondary
-                                    wrapMode: Text.Wrap
-                                    textFormat: Text.PlainText
-                                }
-                                Text {
-                                    visible: modelData.recent_dates && modelData.recent_dates.length > 0
-                                    text: "Recent: " + (modelData.recent_dates || []).join(", ")
-                                    font.pixelSize: 10
-                                    color: theme.textMuted
-                                    elide: Text.ElideRight
-                                    textFormat: Text.PlainText
+                                id: hListCol
+                                anchors.fill: parent
+                                anchors.margins: Theme.spaceMd
+                                spacing: Theme.spaceXs
+                                Repeater {
+                                    model: root.prodHabits
+                                    delegate: OrionListRow {
+                                        Layout.fillWidth: true
+                                        title: modelData.name
+                                        subtitle: (modelData.completed_today ? "Done today" : "Pending") + " · Streak " + modelData.current_streak
+                                        selected: modelData.id === prodPage.selectedHabitId
+                                        onClicked: {
+                                            prodPage.selectedHabitId = modelData.id
+                                            prodPage.selectedHabitIndex = index
+                                            orion.loadHabitStats(modelData.id, prodPage.currentYear, prodPage.currentMonth)
+                                        }
+                                    }
                                 }
                             }
+                        }
 
-                            Button {
-                                text: modelData.completed_today ? "Done Today" : "Log Today"
-                                enabled: !modelData.completed_today
-                                implicitHeight: 26
-                                onClicked: orion.completeHabit(modelData.id)
-                            }
-                            Button {
-                                text: "Undo Latest"
-                                enabled: modelData.total_completions > 0
-                                implicitHeight: 26
-                                onClicked: orion.undoHabitCompletion(modelData.id)
-                            }
-                            Button {
-                                text: "Edit"
-                                implicitHeight: 26
-                                onClicked: prodPage.editingHabit = modelData
-                            }
-                            Button {
-                                text: "Archive"
-                                implicitHeight: 26
-                                onClicked: orion.archiveHabit(modelData.id)
+                        // Year Ring Tracker (260x260)
+                        OrionCard {
+                            Layout.fillWidth: true
+                            implicitHeight: ringCol.implicitHeight + Theme.spaceLg * 2
+                            ColumnLayout {
+                                id: ringCol
+                                anchors.fill: parent
+                                anchors.margins: Theme.spaceLg
+                                spacing: Theme.spaceSm
+
+                                OrionSectionHeader { title: "Year at a glance" }
+
+                                HabitYearRingTracker {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    year: prodPage.currentYear
+                                    completedDates: prodPage.habitStatsData ? prodPage.habitStatsData.year_completed_dates : []
+                                    habitHue: Theme.habitHue(prodPage.selectedHabitIndex)
+                                }
+
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "Inner ring January, outer ring December"
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.fontCaption
+                                    color: Theme.textSecondary
+                                    textFormat: Text.PlainText
+                                }
                             }
                         }
                     }
                 }
-            }
-        }
-    }
 
-    // Task Edit Modal
-    Rectangle {
-        visible: prodPage.editingTask !== null
-        anchors.fill: parent
-        color: "#66000000"
-        z: 950
-        MouseArea { anchors.fill: parent; onClicked: prodPage.editingTask = null }
+                // Right column: Stats + Donut + Line Chart + Month Grid
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    contentWidth: availableWidth
+                    clip: true
 
-        Rectangle {
-            width: Math.min(parent.width - 40, 420)
-            height: editTaskCol.implicitHeight + 32
-            radius: theme.radiusLg
-            color: theme.bgSurface
-            anchors.centerIn: parent
-            MouseArea { anchors.fill: parent; onClicked: {} }
+                    ColumnLayout {
+                        width: parent.width
+                        spacing: Theme.spaceLg
 
-            ColumnLayout {
-                id: editTaskCol
-                anchors.fill: parent
-                anchors.margins: 16
-                spacing: 8
+                        // Statistics row + Completion Donut
+                        OrionCard {
+                            Layout.fillWidth: true
+                            implicitHeight: statsRow.implicitHeight + Theme.spaceLg * 2
+                            RowLayout {
+                                id: statsRow
+                                anchors.fill: parent
+                                anchors.margins: Theme.spaceLg
+                                spacing: Theme.spaceLg
 
-                Text { text: "Edit Task"; font.pixelSize: theme.fontMd; font.bold: true; color: theme.textPrimary }
-                TextField {
-                    id: editTaskTitle
-                    Layout.fillWidth: true
-                    text: prodPage.editingTask ? prodPage.editingTask.title : ""
-                    placeholderText: "Title"
-                }
-                TextField {
-                    id: editTaskDue
-                    Layout.fillWidth: true
-                    text: ""
-                    placeholderText: "New due date (optional, e.g., tomorrow, Friday)"
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    ComboBox {
-                        id: editTaskPriority
-                        Layout.fillWidth: true
-                        model: ["critical", "high", "medium", "low"]
-                        currentIndex: prodPage.editingTask ? Math.max(0, ["critical", "high", "medium", "low"].indexOf(prodPage.editingTask.priority)) : 2
-                    }
-                    ComboBox {
-                        id: editTaskStatus
-                        Layout.fillWidth: true
-                        model: ["todo", "in_progress", "done", "cancelled"]
-                        currentIndex: prodPage.editingTask ? Math.max(0, ["todo", "in_progress", "done", "cancelled"].indexOf(prodPage.editingTask.status)) : 0
-                    }
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    Item { Layout.fillWidth: true }
-                    Button { text: "Cancel"; onClicked: prodPage.editingTask = null }
-                    Button {
-                        text: "Save"
-                        onClicked: {
-                            if (prodPage.editingTask) {
-                                orion.updateTask(
-                                    prodPage.editingTask.id,
-                                    editTaskTitle.text,
-                                    prodPage.editingTask.description || "",
-                                    editTaskPriority.currentText,
-                                    editTaskStatus.currentText,
-                                    editTaskDue.text
-                                )
-                                prodPage.editingTask = null
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: Theme.spaceXs
+                                    readonly property var ms: prodPage.habitStatsData ? prodPage.habitStatsData.month_stats : null
+                                    Text {
+                                        text: "Current streak: " + (parent.ms ? parent.ms.current_streak : 0) + " days"
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontBody
+                                        font.weight: Font.Medium
+                                        color: Theme.text
+                                        textFormat: Text.PlainText
+                                    }
+                                    Text {
+                                        text: "Longest streak: " + (parent.ms ? parent.ms.longest_streak : 0) + " days"
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontSecondary
+                                        color: Theme.textSecondary
+                                        textFormat: Text.PlainText
+                                    }
+                                    Text {
+                                        text: parent.ms ? (parent.ms.completed_dates.length + " of " + parent.ms.elapsed_days + " days this month") : "0 of 0 days this month"
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.fontSecondary
+                                        color: Theme.textSecondary
+                                        textFormat: Text.PlainText
+                                    }
+                                    OrionButton {
+                                        text: "Check in today"
+                                        compact: true
+                                        variant: "primary"
+                                        enabled: prodPage.selectedHabitId.length > 0
+                                        onClicked: orion.completeHabit(prodPage.selectedHabitId)
+                                    }
+                                }
+
+                                HabitCompletionDonut {
+                                    percent: (prodPage.habitStatsData && prodPage.habitStatsData.month_stats)
+                                        ? prodPage.habitStatsData.month_stats.completion_percent
+                                        : 0
+                                }
                             }
                         }
-                    }
-                }
-            }
-        }
-    }
 
-    // Habit Edit Modal
-    Rectangle {
-        visible: prodPage.editingHabit !== null
-        anchors.fill: parent
-        color: "#66000000"
-        z: 950
-        MouseArea { anchors.fill: parent; onClicked: prodPage.editingHabit = null }
+                        // Daily completion line chart
+                        OrionCard {
+                            Layout.fillWidth: true
+                            implicitHeight: chartCol.implicitHeight + Theme.spaceLg * 2
+                            ColumnLayout {
+                                id: chartCol
+                                anchors.fill: parent
+                                anchors.margins: Theme.spaceLg
+                                spacing: Theme.spaceSm
+                                OrionSectionHeader { title: "Daily completion" }
+                                HabitDailyLineChart {
+                                    Layout.fillWidth: true
+                                    dailySeries: prodPage.habitStatsData ? prodPage.habitStatsData.daily_series : []
+                                    hasData: !!(prodPage.habitStatsData && prodPage.habitStatsData.year_completed_dates && prodPage.habitStatsData.year_completed_dates.length > 0)
+                                }
+                            }
+                        }
 
-        Rectangle {
-            width: Math.min(parent.width - 40, 400)
-            height: editHabitCol.implicitHeight + 32
-            radius: theme.radiusLg
-            color: theme.bgSurface
-            anchors.centerIn: parent
-            MouseArea { anchors.fill: parent; onClicked: {} }
-
-            ColumnLayout {
-                id: editHabitCol
-                anchors.fill: parent
-                anchors.margins: 16
-                spacing: 8
-
-                Text { text: "Edit Habit"; font.pixelSize: theme.fontMd; font.bold: true; color: theme.textPrimary }
-                TextField {
-                    id: editHabitName
-                    Layout.fillWidth: true
-                    text: prodPage.editingHabit ? prodPage.editingHabit.name : ""
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    ComboBox {
-                        id: editHabitFreq
-                        Layout.fillWidth: true
-                        model: ["daily", "weekly", "monthly"]
-                        currentIndex: prodPage.editingHabit ? Math.max(0, ["daily", "weekly", "monthly"].indexOf(prodPage.editingHabit.frequency)) : 0
-                    }
-                    SpinBox {
-                        id: editHabitTarget
-                        from: 1
-                        to: 31
-                        value: prodPage.editingHabit ? prodPage.editingHabit.target_count : 1
-                    }
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    Item { Layout.fillWidth: true }
-                    Button { text: "Cancel"; onClicked: prodPage.editingHabit = null }
-                    Button {
-                        text: "Save"
-                        onClicked: {
-                            if (prodPage.editingHabit) {
-                                orion.updateHabit(
-                                    prodPage.editingHabit.id,
-                                    editHabitName.text,
-                                    prodPage.editingHabit.description || "",
-                                    editHabitFreq.currentText,
-                                    editHabitTarget.value
-                                )
-                                prodPage.editingHabit = null
+                        // Month grid by week
+                        OrionCard {
+                            Layout.fillWidth: true
+                            implicitHeight: mGridCol.implicitHeight + Theme.spaceLg * 2
+                            ColumnLayout {
+                                id: mGridCol
+                                anchors.fill: parent
+                                anchors.margins: Theme.spaceLg
+                                spacing: Theme.spaceSm
+                                OrionSectionHeader { title: "This month by week" }
+                                HabitMonthGrid {
+                                    Layout.fillWidth: true
+                                    year: prodPage.currentYear
+                                    month: prodPage.currentMonth
+                                    daysInMonth: (prodPage.habitStatsData && prodPage.habitStatsData.month_stats) ? prodPage.habitStatsData.month_stats.days_in_month : 30
+                                    elapsedDays: (prodPage.habitStatsData && prodPage.habitStatsData.month_stats) ? prodPage.habitStatsData.month_stats.elapsed_days : 1
+                                    completedDates: (prodPage.habitStatsData && prodPage.habitStatsData.month_stats) ? prodPage.habitStatsData.month_stats.completed_dates : []
+                                    habitHue: Theme.habitHue(prodPage.selectedHabitIndex)
+                                }
                             }
                         }
                     }

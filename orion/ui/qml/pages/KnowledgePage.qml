@@ -655,11 +655,27 @@ Rectangle {
                 border.width: 1
                 border.color: theme.border
 
-                readonly property var doc: knowledgePage.selectedDetailSource()
-                onDocChanged: {
-                    if (detailPane.doc && detailPane.doc.file_type === "epub" && typeof orion !== "undefined" && orion !== null) {
-                        orion.loadEpubChapters(detailPane.doc.id, "", 0, 50)
+                property var doc: null
+                function refreshDoc() {
+                    const nextDoc = knowledgePage.selectedDetailSource()
+                    if (doc !== nextDoc) {
+                        doc = nextDoc
+                        if (doc && doc.file_type === "epub" && typeof orion !== "undefined" && orion !== null) {
+                            const docId = doc.id
+                            Qt.callLater(function() {
+                                orion.loadEpubChapters(docId, "", 0, 50)
+                            })
+                        }
                     }
+                }
+                Component.onCompleted: refreshDoc()
+                Connections {
+                    target: knowledgePage
+                    function onSelectedDetailIdChanged() { detailPane.refreshDoc() }
+                }
+                Connections {
+                    target: knowledgeSourcesModel
+                    function onCountChanged() { detailPane.refreshDoc() }
                 }
 
                 ScrollView {

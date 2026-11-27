@@ -246,6 +246,21 @@ def main() -> int:
             productivity_coordinator=productivity_coordinator,
         )
 
+        # 7b. Construct offline voice service (lazy model loading + idle unload)
+        from orion.application.voice.heavy_work_gate import HeavyWorkGate
+        from orion.application.voice.voice_service import VoiceService
+        from orion.infrastructure.voice.audio_io import PipeWireAudioInput, PipeWireAudioOutput
+        from orion.infrastructure.voice.piper_tts import PiperTtsAdapter
+        from orion.infrastructure.voice.whispercpp_stt import WhisperCppSttAdapter
+
+        voice_service = VoiceService(
+            stt=WhisperCppSttAdapter(),
+            tts=PiperTtsAdapter(),
+            audio_in=PipeWireAudioInput(),
+            audio_out=PipeWireAudioOutput(),
+            gate=HeavyWorkGate(),
+        )
+
         # 8. Construct OrionBridge & coordinate graceful lifecycle
         bridge = OrionBridge(
             assistant_service=assistant_service,
@@ -253,6 +268,7 @@ def main() -> int:
             task_service=task_service,
             habit_service=habit_service,
             productivity_coordinator=productivity_coordinator,
+            voice_service=voice_service,
         )
         lifecycle = ApplicationLifecycle(
             single_instance=single_instance,

@@ -161,11 +161,20 @@ class OrionBridge(QObject):
     workspaceAddedToKnowledge = Signal(str, str, bool)
     responseReferences = Signal(str, list)
 
-    # Personal productivity signals (Milestone 4.11)
+    # Personal productivity signals (Milestone 4.11 & 4.13)
     productivityAvailableChanged = Signal(bool)
     productivityDataLoaded = Signal(dict)
     productivityActionResult = Signal(str, dict)
     productivityError = Signal(str)
+    habitStatsLoaded = Signal(dict)
+
+    # Theme & Offline Voice signals (Milestone 4.12 Phase F & 4.13)
+    themeModeChanged = Signal(str)
+    voiceStateChanged = Signal()
+    voiceSettingsChanged = Signal()
+    voiceAssetStatusChanged = Signal()
+    voiceTranscriptReady = Signal(str)
+    voiceError = Signal(str, str)
 
     def __init__(
         self,
@@ -180,6 +189,7 @@ class OrionBridge(QObject):
         task_service: TaskService | None = None,
         habit_service: HabitService | None = None,
         productivity_coordinator: ProductivityActionCoordinator | None = None,
+        voice_service: Any = None,
     ) -> None:
         super().__init__(parent)
         self._service = assistant_service
@@ -203,6 +213,33 @@ class OrionBridge(QObject):
 
         self._knowledge_service: KnowledgeService | None = knowledge_service
         self._task_service: TaskService | None = task_service
+        self._voice_service: Any = voice_service
+        self._voice_state: str = "idle"
+        self._theme_mode: str = "light"
+        if getattr(self._service, "_settings_store", None) is not None:
+            try:
+                saved_theme = self._service._settings_store.get_setting("ui_theme_mode")
+                if saved_theme in ("light", "dark", "system"):
+                    self._theme_mode = saved_theme
+                if self._voice_service is not None:
+                    v_en = self._service._settings_store.get_setting("voice_enabled")
+                    v_as = self._service._settings_store.get_setting("voice_auto_speak")
+                    from orion.application.voice.contracts import VoiceSettings
+
+                    cur = self._voice_service.settings
+                    self._voice_service.update_settings(
+                        VoiceSettings(
+                            enabled=(v_en != "false") if v_en is not None else cur.enabled,
+                            input_device=cur.input_device,
+                            tts_voice=cur.tts_voice,
+                            auto_speak_responses=(v_as == "true")
+                            if v_as is not None
+                            else cur.auto_speak_responses,
+                            idle_unload_seconds=cur.idle_unload_seconds,
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to load UI/voice settings: %s", exc)
         self._habit_service: HabitService | None = habit_service
         self._productivity_coordinator: ProductivityActionCoordinator | None = (
             productivity_coordinator
@@ -1325,6 +1362,20 @@ class OrionBridge(QObject):
                 active_id = self._service.active_conversation_id or conv_dict["id"]
                 self.conversationsLoaded.emit(convs, active_id)
                 return
+            if tag == "voice_transcribed":
+                _, text = result
+                self._set_voice_state("idle")
+                if text:
+                    self.voiceTranscriptReady.emit(text)
+                return
+            if tag == "voice_spoken":
+                self._set_voice_state("idle")
+                return
+            if tag == "voice_error":
+                _, code, msg = result
+                self._set_voice_state("idle")
+                self.voiceError.emit(code, msg)
+                return
             if tag == "conversation_deleted":
                 _, deleted_id, was_active, convs, active_id = result
                 self.conversationDeleted.emit(deleted_id)
@@ -1736,3 +1787,196 @@ class OrionBridge(QObject):
             self._emit_productivity_snapshot()
         except Exception as exc:  # noqa: BLE001
             self.productivityError.emit(str(exc))
+
+    # ------------------------------------------------------------------
+    # Theme & Habit Stats & Offline Voice (Milestone 4.12 Phase F & 4.13)
+    # ------------------------------------------------------------------
+
+    @Property(str, notify=themeModeChanged)
+    def themeMode(self) -> str:
+        return self._theme_mode
+
+    @Slot(str)
+    def setThemeMode(self, mode: str) -> None:
+        clean = (mode or "light").strip().lower()
+        if clean not in ("light", "dark", "system"):
+            clean = "light"
+        if clean == self._theme_mode:
+            return
+        self._theme_mode = clean
+        if getattr(self._service, "_settings_store", None) is not None:
+            try:
+                self._service._settings_store.set_setting("ui_theme_mode", clean)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist ui_theme_mode: %s", exc)
+        self.themeModeChanged.emit(clean)
+
+    @Slot(str, int, int)
+    def loadHabitStats(self, habit_id: str, year: int, month: int) -> None:
+        if self._habit_service is None:
+            return
+        try:
+            from orion.application.productivity.habit_stats_query import HabitStatsQuery
+
+            q = HabitStatsQuery(self._habit_service, self._habit_service._clock)
+            ms = q.get_habit_month_stats(habit_id, int(year), int(month))
+            year_dates = q.get_habit_year_completed_dates(habit_id, int(year)) if habit_id else ()
+            daily = q.get_monthly_daily_series(int(year), int(month))
+            self.habitStatsLoaded.emit(
+                {
+                    "habit_id": habit_id,
+                    "year": int(year),
+                    "month": int(month),
+                    "month_stats": {
+                        "days_in_month": ms.days_in_month,
+                        "elapsed_days": ms.elapsed_days,
+                        "completed_dates": list(ms.completed_dates),
+                        "scheduled_days": ms.scheduled_days,
+                        "current_streak": ms.current_streak,
+                        "longest_streak": ms.longest_streak,
+                        "completion_percent": ms.completion_percent,
+                    }
+                    if ms is not None
+                    else None,
+                    "year_completed_dates": list(year_dates),
+                    "daily_series": [
+                        {
+                            "day": p.day,
+                            "date_iso": p.date_iso,
+                            "scheduled_count": p.scheduled_count,
+                            "completed_count": p.completed_count,
+                            "ratio": p.ratio,
+                        }
+                        for p in daily
+                    ],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.productivityError.emit(str(exc))
+
+    @Property(bool, constant=True)
+    def voiceAvailable(self) -> bool:
+        return self._voice_service is not None
+
+    @Property(bool, notify=voiceSettingsChanged)
+    def voiceEnabled(self) -> bool:
+        return bool(self._voice_service and self._voice_service.settings.enabled)
+
+    @Property(bool, notify=voiceSettingsChanged)
+    def voiceAutoSpeak(self) -> bool:
+        return bool(self._voice_service and self._voice_service.settings.auto_speak_responses)
+
+    @Property(str, notify=voiceStateChanged)
+    def voiceState(self) -> str:
+        return self._voice_state
+
+    @Property("QVariantMap", notify=voiceAssetStatusChanged)
+    def voiceAssetStatus(self) -> dict[str, Any]:
+        if self._voice_service is None:
+            return {"stt_ready": False, "tts_ready": False, "mic_available": False, "fix_hint": ""}
+        st = self._voice_service.get_asset_status()
+        return {
+            "stt_ready": st.stt_ready,
+            "stt_model_path": str(st.stt_model_path),
+            "tts_ready": st.tts_ready,
+            "tts_model_path": str(st.tts_model_path),
+            "mic_available": st.mic_available,
+            "audio_backend": st.audio_backend,
+            "fix_hint": st.fix_hint,
+        }
+
+    @Slot()
+    def refreshVoiceStatus(self) -> None:
+        self.voiceAssetStatusChanged.emit()
+
+    @Slot(bool, bool)
+    def setVoiceSettings(self, enabled: bool, auto_speak: bool) -> None:
+        if self._voice_service is None:
+            return
+        from orion.application.voice.contracts import VoiceSettings
+
+        cur = self._voice_service.settings
+        self._voice_service.update_settings(
+            VoiceSettings(
+                enabled=bool(enabled),
+                input_device=cur.input_device,
+                tts_voice=cur.tts_voice,
+                auto_speak_responses=bool(auto_speak),
+                idle_unload_seconds=cur.idle_unload_seconds,
+            )
+        )
+        if getattr(self._service, "_settings_store", None) is not None:
+            try:
+                self._service._settings_store.set_setting(
+                    "voice_enabled", "true" if enabled else "false"
+                )
+                self._service._settings_store.set_setting(
+                    "voice_auto_speak", "true" if auto_speak else "false"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to persist voice settings: %s", exc)
+        self.voiceSettingsChanged.emit()
+
+    def _set_voice_state(self, state: str) -> None:
+        if self._voice_state != state:
+            self._voice_state = state
+            self.voiceStateChanged.emit()
+
+    @Slot()
+    def startVoiceRecording(self) -> None:
+        if self._voice_service is None:
+            self.voiceError.emit("voice_disabled", "Voice service is not configured.")
+            return
+        try:
+            self._voice_service.start_recording()
+            self._set_voice_state("recording")
+        except Exception as exc:  # noqa: BLE001
+            code = getattr(exc, "code", "device_error")
+            self.voiceError.emit(str(code), str(exc))
+            self._set_voice_state("idle")
+
+    @Slot()
+    def stopVoiceRecording(self) -> None:
+        if self._voice_service is None:
+            return
+        self._set_voice_state("transcribing")
+
+        def _task() -> tuple[str, ...]:
+            try:
+                res = self._voice_service.stop_recording_and_transcribe()
+                return ("voice_transcribed", res.text)
+            except Exception as exc:  # noqa: BLE001
+                code = str(getattr(exc, "code", "transcription_failed"))
+                return ("voice_error", code, str(exc))
+
+        self._start_worker(generate_request_id(), _task)
+
+    @Slot()
+    def cancelVoiceRecording(self) -> None:
+        if self._voice_service is None:
+            return
+        self._voice_service.cancel_recording()
+        self._set_voice_state("idle")
+
+    @Slot(str)
+    def speakMessage(self, text: str) -> None:
+        if self._voice_service is None:
+            return
+        self._set_voice_state("speaking")
+
+        def _task() -> tuple[str, ...]:
+            try:
+                self._voice_service.speak_text(text)
+                return ("voice_spoken", "")
+            except Exception as exc:  # noqa: BLE001
+                code = str(getattr(exc, "code", "speech_generation_failed"))
+                return ("voice_error", code, str(exc))
+
+        self._start_worker(generate_request_id(), _task)
+
+    @Slot()
+    def stopSpeaking(self) -> None:
+        if self._voice_service is None:
+            return
+        self._voice_service.cancel_playback()
+        self._set_voice_state("idle")
