@@ -8,6 +8,9 @@ Rectangle {
     required property var root
     required property var chatModel
     required property var conversationsModel
+    property var knowledgeSourcesModel: null
+    property string pickerQuery: ""
+    property string pickerFormat: "all"
     property alias chatListView: chatList
     property alias composerField: composer
 
@@ -152,10 +155,14 @@ Rectangle {
                         Layout.fillWidth: true
                         text: {
                             if (root.knowledgeMode === "ask_knowledge")
-                                return "Ask Knowledge · Searches all indexed documents"
+                                return "Knowledge · All indexed documents"
                             if (root.knowledgeMode === "selected_sources")
-                                return "Selected Sources · " + root.selectedKnowledgeIds.length + " document(s)"
-                            return root.activeConversationId ? "Chat · Local assistant" : "Start a new conversation"
+                                return "Knowledge · " + root.selectedKnowledgeIds.length + " selected document(s)"
+                            if (root.knowledgeMode === "web_search")
+                                return "Web · Public browser search"
+                            if (root.knowledgeMode === "web_and_selected")
+                                return "Web + Knowledge · " + root.selectedKnowledgeIds.length + " selected document(s)"
+                            return "Chat · No external sources"
                         }
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.fontSecondary
@@ -188,7 +195,22 @@ Rectangle {
                         text: root.selectedKnowledgeIds.length > 0 ? ("Selected (" + root.selectedKnowledgeIds.length + ")") : "Selected"
                         compact: true
                         variant: root.knowledgeMode === "selected_sources" ? "primary" : "secondary"
-                        onClicked: root.setChatKnowledgeMode("selected_sources")
+                        onClicked: {
+                            root.setChatKnowledgeMode("selected_sources")
+                            docPickerDialog.open()
+                        }
+                    }
+                    OrionButton {
+                        objectName: "modeWebSearchButton"
+                        text: "Web"
+                        compact: true
+                        variant: (root.knowledgeMode === "web_search" || root.knowledgeMode === "web_and_selected") ? "primary" : "secondary"
+                        onClicked: {
+                            if (root.selectedKnowledgeIds.length > 0)
+                                root.setChatKnowledgeMode(root.knowledgeMode === "web_and_selected" ? "web_search" : "web_and_selected")
+                            else
+                                root.setChatKnowledgeMode("web_search")
+                        }
                     }
                 }
 
@@ -353,7 +375,11 @@ Rectangle {
                                         lineHeight: Theme.chatLineHeight
                                         color: model.isError ? Theme.danger : Theme.text
                                         wrapMode: Text.WordWrap
-                                        textFormat: Text.PlainText
+                                        textFormat: (!isUser && model.status === "completed") ? Text.MarkdownText : Text.PlainText
+                                        onLinkActivated: function(link) {
+                                            if (link.startsWith("https://") || link.startsWith("http://"))
+                                                Qt.openUrlExternally(link)
+                                        }
                                     }
 
                                     // Play / Stop TTS button on completed assistant messages
@@ -505,15 +531,21 @@ Rectangle {
                             text: {
                                 if (root.knowledgeMode === "ask_knowledge") return "Scope: All Docs"
                                 if (root.knowledgeMode === "selected_sources") return "Scope: Selected (" + root.selectedKnowledgeIds.length + ")"
+                                if (root.knowledgeMode === "web_search") return "Scope: Web"
+                                if (root.knowledgeMode === "web_and_selected") return "Scope: Web + Docs (" + root.selectedKnowledgeIds.length + ")"
                                 return "Scope: Chat"
                             }
                             variant: root.knowledgeMode === "chat" ? "quiet" : "secondary"
                             compact: true
-                            onClicked: {
-                                if (root.knowledgeMode === "chat") root.setChatKnowledgeMode("ask_knowledge")
-                                else if (root.knowledgeMode === "ask_knowledge") root.setChatKnowledgeMode("selected_sources")
-                                else root.setChatKnowledgeMode("chat")
-                            }
+                            onClicked: docPickerDialog.open()
+                        }
+
+                        OrionButton {
+                            visible: root.knowledgeAvailable && root.selectedKnowledgeIds.length > 0
+                            text: "Clear (" + root.selectedKnowledgeIds.length + ")"
+                            variant: "quiet"
+                            compact: true
+                            onClicked: root.clearKnowledgeScope()
                         }
 
                         Item { Layout.fillWidth: true }
@@ -547,6 +579,79 @@ Rectangle {
                             variant: "primary"
                             compact: true
                             onClicked: root.sendMessage()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Chat Document Picker Dialog
+    Dialog {
+        id: docPickerDialog
+        title: "Select Sources & Mode"
+        modal: true
+        anchors.centerIn: parent
+        width: Math.min(chatPage.width * 0.8, 560)
+        height: Math.min(chatPage.height * 0.8, 480)
+        standardButtons: Dialog.Close
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: Theme.spaceSm
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spaceSm
+                OrionTextField {
+                    Layout.fillWidth: true
+                    placeholderText: "Search indexed documents..."
+                    onTextChanged: chatPage.pickerQuery = text.trim().toLowerCase()
+                }
+                ComboBox {
+                    model: ["all", "pdf", "epub", "docx", "md", "txt"]
+                    implicitHeight: Theme.controlHeight
+                    onCurrentTextChanged: chatPage.pickerFormat = currentText
+                }
+            }
+
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: Theme.spaceXs
+                model: chatPage.knowledgeSourcesModel
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                delegate: Rectangle {
+                    readonly property bool matchesQuery: !chatPage.pickerQuery || (model.display_name || "").toLowerCase().indexOf(chatPage.pickerQuery) !== -1
+                    readonly property bool matchesFmt: chatPage.pickerFormat === "all" || (model.file_type || "").toLowerCase() === chatPage.pickerFormat
+                    visible: matchesQuery && matchesFmt
+                    width: ListView.view ? ListView.view.width : 0
+                    height: visible ? 38 : 0
+                    radius: Theme.radiusControl
+                    color: root.isSourceSelected(model.id) ? Theme.bgSelected : Theme.surface
+                    border.width: 1
+                    border.color: Theme.hairline
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.spaceSm
+                        anchors.rightMargin: Theme.spaceSm
+                        spacing: Theme.spaceSm
+
+                        CheckBox {
+                            checked: root.isSourceSelected(model.id)
+                            onToggled: root.toggleKnowledgeSource(model.id)
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: (model.display_name || "Document") + " (" + (model.file_type || "") + " · " + (model.status || "") + ")"
+                            font.family: Theme.fontFamily
+                            font.pixelSize: Theme.fontSecondary
+                            color: Theme.text
+                            elide: Text.ElideRight
+                            textFormat: Text.PlainText
                         }
                     }
                 }

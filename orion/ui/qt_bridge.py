@@ -51,6 +51,10 @@ def _scope_to_mode(scope_str: str) -> str:
         return "ask_knowledge"
     if low == "selected_documents":
         return "selected_sources"
+    if low == "web_search":
+        return "web_search"
+    if low == "web_and_selected":
+        return "web_and_selected"
     return "chat"
 
 
@@ -351,7 +355,15 @@ class OrionBridge(QObject):
                 scope_val = (
                     "all_indexed"
                     if new_mode == "ask_knowledge"
-                    else ("selected_documents" if new_mode == "selected_sources" else "none")
+                    else (
+                        "selected_documents"
+                        if new_mode == "selected_sources"
+                        else (
+                            "web_search"
+                            if new_mode == "web_search"
+                            else ("web_and_selected" if new_mode == "web_and_selected" else "none")
+                        )
+                    )
                 )
                 self._service.update_conversation_knowledge_context(knowledge_scope=scope_val)
             self.knowledgeModeChanged.emit(new_mode)
@@ -1244,6 +1256,10 @@ class OrionBridge(QObject):
             scope = KnowledgeScope.ALL_INDEXED
         elif norm_mode == "selected_sources":
             scope = KnowledgeScope.SELECTED_DOCUMENTS
+        elif norm_mode == "web_search":
+            scope = KnowledgeScope.WEB_SEARCH
+        elif norm_mode == "web_and_selected":
+            scope = KnowledgeScope.WEB_AND_SELECTED
         else:
             scope = KnowledgeScope.NONE
 

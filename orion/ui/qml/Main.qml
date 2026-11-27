@@ -340,7 +340,7 @@ ApplicationWindow {
             currentIndex: ["home", "chat", "knowledge", "workspace", "productivity", "settings"].indexOf(root.activePage)
 
             HomePage { root: root }
-            ChatPage { id: chatPage; root: root; chatModel: chatModel; conversationsModel: conversationsModel }
+            ChatPage { id: chatPage; root: root; chatModel: chatModel; conversationsModel: conversationsModel; knowledgeSourcesModel: knowledgeSourcesModel }
             KnowledgePage { objectName: "knowledgePanel"; root: root; theme: Theme; knowledgeSourcesModel: knowledgeSourcesModel }
             WorkspacePage { objectName: "workspaceBrowserPanel"; root: root; theme: Theme; workspaceEntriesModel: workspaceEntriesModel }
             ProductivityPage { root: root }

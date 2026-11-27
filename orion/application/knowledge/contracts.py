@@ -20,6 +20,8 @@ class KnowledgeScope(StrEnum):
     NONE = "none"
     ALL_INDEXED = "all_indexed"
     SELECTED_DOCUMENTS = "selected_documents"
+    WEB_SEARCH = "web_search"
+    WEB_AND_SELECTED = "web_and_selected"
 
 
 class ReadingPolicy(StrEnum):
