@@ -102,6 +102,8 @@ def test_manual_unlock_and_lock_via_real_qml_button_click(tmp_path: Path) -> Non
     assert session.state == SessionState.UNLOCKED
 
     bridge.shutdown()
+    qml.deleteLater()
+    app.processEvents()
     del qml
     del bridge
     engine.dispose()
@@ -182,6 +184,8 @@ def test_floating_orb_independent_lifecycle_expand_hide_and_restore(tmp_path: Pa
     assert not orb.isVisible()
 
     bridge.shutdown()
+    qml.deleteLater()
+    app.processEvents()
     del qml
     del bridge
     engine.dispose()
@@ -268,6 +272,8 @@ def test_real_pipewire_capture_whisper_transcription_cancel_and_error(tmp_path: 
     assert root.property("voiceErrorMessage") == "Microphone capture failed"
 
     bridge.shutdown()
+    qml.deleteLater()
+    app.processEvents()
     del qml
     del bridge
     engine.dispose()

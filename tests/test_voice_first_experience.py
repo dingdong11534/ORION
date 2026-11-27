@@ -12,7 +12,6 @@ from alembic.config import Config
 from PySide6.QtCore import QUrl
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickItem, QQuickWindow
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from alembic import command
@@ -211,7 +210,6 @@ def test_qml_persistent_mic_visibility_navigation_and_locked_session(tmp_path: P
     root = qml.rootObjects()[0]
     bridge._thread_pool.waitForDone(3000)
     app.processEvents()
-    QTest.qWait(40)
 
     # Persistent mic bar in Main window
     mic_bar = root.findChild(QQuickItem, "persistentMicBar")
@@ -222,7 +220,7 @@ def test_qml_persistent_mic_visibility_navigation_and_locked_session(tmp_path: P
     # Pause mic -> updates both Main window & Collapsed Orb badge
     bridge.pauseVoiceListening()
     bridge.setBackgroundMode(True)
-    QTest.qWait(50)
+    app.processEvents()
     orb = root.findChild(QQuickWindow, "orionOrbWindow")
     assert orb is not None and orb.isVisible()
     badge = orb.findChild(QQuickItem, "orbCollapsedMicBadge")
@@ -231,19 +229,20 @@ def test_qml_persistent_mic_visibility_navigation_and_locked_session(tmp_path: P
     # Voice navigation while session is LOCKED: open_productivity restores window & switches page
     assert session.state == SessionState.LOCKED
     bridge.voiceNavigationRequested.emit("open_productivity")
-    QTest.qWait(50)
+    app.processEvents()
     assert root.isVisible()
     assert root.property("activePage") == "productivity"
     assert session.state == SessionState.LOCKED
 
     # Minimize back to orb
     bridge.voiceNavigationRequested.emit("minimize_to_orb")
-    QTest.qWait(50)
+    app.processEvents()
     assert not root.isVisible()
     assert orb.isVisible()
 
     root.close()
     bridge.shutdown()
+    qml.deleteLater()
     app.processEvents()
     del qml
     del bridge

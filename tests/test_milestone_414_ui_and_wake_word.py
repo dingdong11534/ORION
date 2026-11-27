@@ -155,6 +155,8 @@ def test_conversation_list_layout_widths_overflow_inline_rename_and_delete(tmp_p
     assert len(conv_store.list_conversations()) == 1
 
     bridge.shutdown()
+    qml.deleteLater()
+    app.processEvents()
     del qml
     del bridge
     engine.dispose()
@@ -263,6 +265,8 @@ def test_wake_word_vosk_cooldown_ptt_pause_and_orb_open_while_locked(tmp_path: P
     assert session.state == SessionState.LOCKED
 
     bridge.shutdown()
+    qml.deleteLater()
+    app.processEvents()
     del qml
     del bridge
     engine.dispose()
